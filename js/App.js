@@ -1,7 +1,7 @@
 const PINATA_API_KEY = "50b5df13aede683fbc67";
 const PINATA_SECRET_API_KEY = "02e2332a30d4ff4c5dcc818d72f7c1f12735420136783417704318f0fa179535";
 window.CONTRACT = {
-  address: "0xcc201EC7DAD846a4F9Cb2737AB063e2c880742DD",
+  address: "0xF1f20B0C02C8577bc7d3345147D197b1037D0425",
   network: "Example : https://polygon-rpc.com/",
   explore: "Example : https://polygonscan.com/",
   abi: [
