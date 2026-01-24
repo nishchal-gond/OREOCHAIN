@@ -79,9 +79,9 @@ Make sure you have the following installed:
 
 ### 1️⃣ Clone the Repository
 
-```bash
 git clone https://github.com/Rio2802/OREOCHAIN.git
-cd OREOCHAIN
+
+
 2️⃣ Install Dependencies
 npm install
 3️⃣ Deploy Smart Contract
