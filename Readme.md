@@ -2,71 +2,76 @@
 
 > **Decentralized Document Storage using Blockchain & IPFS**
 
-OREOCHAIN is a secure, decentralized, and tamper-proof document storage system built using **Blockchain** and **IPFS (InterPlanetary File System)**. The project ensures document authenticity and integrity by storing cryptographic hashes on the blockchain while keeping actual files distributed across IPFS.
+OREOCHAIN is a secure, decentralized, and tamper-proof document storage system built using **Blockchain** and **IPFS (InterPlanetary File System)**. The project ensures document authenticity and integrity by storing cryptographic hashes on the blockchain while keeping the actual documents distributed across IPFS.
 
-This project is designed as a **final-year engineering project**, with real-world relevance in **secure storage, Web3, and decentralized infrastructure**.
+This project is developed as a **final-year engineering project** with real-world relevance in **Web3, decentralized storage, and secure systems**.
 
 ---
 
 ## 🚀 Project Overview
 
-Traditional centralized storage systems suffer from security risks, data tampering, and single points of failure. **OREOCHAIN** solves these challenges by combining:
+Traditional centralized document storage systems suffer from:
+- Single points of failure
+- Data tampering risks
+- Lack of transparency
+- Central authority dependency
 
-* **Blockchain** → Immutable storage of document hashes
-* **IPFS** → Decentralized and content-addressed file storage
+**OREOCHAIN** solves these problems by combining:
+
+- **Blockchain** → Immutable storage of document hashes  
+- **IPFS** → Decentralized, content-addressed file storage  
 
 This architecture guarantees:
-
-* Data integrity
-* Transparency
-* Decentralization
-* Trustless verification
+- Data integrity
+- Transparency
+- Decentralization
+- Trustless verification
 
 ---
 
 ## ✨ Key Features
 
-* 🔐 **Tamper-Proof Document Storage**
+- 🔐 **Tamper-Proof Storage**  
   Document hashes stored on blockchain ensure immutability.
 
-* 🌐 **Decentralized Architecture**
+- 🌐 **Decentralized Architecture**  
   No centralized server or single point of failure.
 
-* ⚡ **Fast Retrieval & Verification**
-  Retrieve documents instantly using IPFS hashes.
+- ⚡ **Fast Retrieval & Verification**  
+  Documents are retrieved using IPFS hashes.
 
-* 🧩 **Blockchain-Based Proof**
+- 🧩 **Blockchain-Based Proof**  
   Anyone can verify document authenticity.
 
-* 🖥️ **User-Friendly Interface**
+- 🖥️ **User-Friendly Interface**  
   Simple UI for uploading and retrieving documents.
 
-* 📁 **Multi-Format Support**
+- 📁 **Multi-Format Support**  
   Supports PDFs, images, text files, and more.
 
 ---
 
 ## 🛠️ Tech Stack
 
-* **Blockchain:** Ethereum
-* **Smart Contracts:** Solidity
-* **Decentralized Storage:** IPFS
-* **Wallet Integration:** MetaMask
-* **Frontend:** HTML, CSS, JavaScript
-* **Blockchain Interaction:** Web3.js / Ethers.js
-* **IPFS Provider:** Infura
+- **Blockchain:** Ethereum  
+- **Smart Contracts:** Solidity  
+- **Decentralized Storage:** IPFS  
+- **Wallet Integration:** MetaMask  
+- **Frontend:** HTML, CSS, JavaScript  
+- **Blockchain Interaction:** Web3.js / Ethers.js  
+- **IPFS Provider:** Infura (or Pinata)
 
 ---
 
 ## 📋 Prerequisites
 
-Ensure you have the following installed:
+Make sure you have the following installed:
 
-* Node.js & npm
-* MetaMask browser extension
-* Infura account (IPFS API Key & Secret)
-* Remix Online IDE
-* VS Code with Live Server extension
+- Node.js & npm  
+- MetaMask browser extension  
+- Infura / Pinata IPFS API credentials  
+- Remix Online IDE  
+- VS Code with Live Server extension  
 
 ---
 
@@ -77,116 +82,114 @@ Ensure you have the following installed:
 ```bash
 git clone https://github.com/Rio2802/OREOCHAIN.git
 cd OREOCHAIN
-```
-
----
-
-### 2️⃣ Install Dependencies
-
-```bash
+2️⃣ Install Dependencies
 npm install
-```
+3️⃣ Deploy Smart Contract
+Open Remix IDE
 
----
+Upload contract.sol
 
-### 3️⃣ Deploy Smart Contract
+Compile and deploy the contract
 
-1. Open **Remix IDE** (online)
-2. Upload `contract.sol`
-3. Compile and deploy the smart contract
-4. Copy the deployed **contract address**
+Copy the deployed contract address
 
----
+4️⃣ Configure Frontend
+In app.js:
 
-### 4️⃣ Configure Blockchain Settings
+Paste the contract address
 
-* Paste the **contract address** into `app.js`
-* Set the **network URL** and **block explorer URL**
-* Ensure MetaMask is connected to the same network
+Configure:
 
----
+Network RPC URL
 
-### 5️⃣ Configure IPFS (Infura)
+Block explorer URL
 
-1. Create an account on **Infura**
-2. Generate an **IPFS API Key & Secret**
-3. Paste them inside the `uploadToInfura()` function in `app.js`
+Ensure MetaMask is connected to the same network
 
----
+5️⃣ Configure IPFS
+Inside uploadToInfura() function in app.js, add:
 
-### 6️⃣ Run the Application
+IPFS API Key
 
-* Open `index.html` using **Live Server**
-* Connect MetaMask wallet
-* Ensure correct network selection
+IPFS API Secret
 
----
+6️⃣ Run the Application
+Right-click index.html
 
-## 📌 Usage Guide
+Open with Live Server
 
-### ➕ Add Exporter
+Connect MetaMask wallet
 
-1. Click **Add Exporter**
-2. Enter the exporter’s **MetaMask wallet address**
-3. Confirm the transaction
+Select correct blockchain network
 
----
+📌 Usage Guide
+➕ Add Exporter
+Click Add Exporter
 
-### 📤 Upload Document
+Enter exporter’s MetaMask address
 
-1. Click **Upload Document**
-2. Select a file from your system
-3. The system will:
+Confirm transaction
 
-   * Encrypt the file
-   * Upload it to IPFS
-   * Store its hash on the blockchain
+📤 Upload Document
+Click Upload Document
 
----
+Select any file
 
-### 📥 Retrieve Document
+The system will:
 
-1. Click **Retrieve Document**
-2. Enter the document hash
-3. The document is fetched from IPFS and displayed
+Upload file to IPFS
 
----
+Generate an IPFS hash
 
-## 🔒 Security Highlights
+Store the hash on the blockchain
 
-* Immutable blockchain records
-* Content-addressed IPFS storage
-* Wallet-based authentication
-* No centralized database
+📥 Retrieve Document
+Click Retrieve Document
 
----
+Enter the document hash
 
-## 🔮 Future Enhancements
+File is fetched from IPFS and displayed
 
-* Role-based access control
-* Multi-chain support
-* File versioning
-* Advanced encryption
-* Improved UI/UX
+🏗️ System Architecture
+Frontend (HTML/JS)
+│
+├── MetaMask Wallet
+├── IPFS (Infura/Pinata)
+│
+Smart Contract (Solidity)
+└── Stores IPFS Hashes on Blockchain
 
----
+🔒 Security Highlights
+Immutable blockchain records
 
-## 📜 License
+Content-addressed IPFS storage
 
-This project is licensed under the **MIT License**.
+Wallet-based authentication
 
----
+No centralized database
 
-## 🤝 Contributing
+🔮 Future Enhancements
+Role-based access control
 
-Contributions are welcome. Fork the repository and submit pull requests.
+Multi-chain support
 
----
+File versioning
 
-## 📬 Contact
+Advanced encryption
 
+Improved UI/UX
+
+📜 License
+This project is licensed under the MIT License.
+
+🤝 Contributing
+Contributions are welcome.
+Fork the repository and submit pull requests.
+
+📬 Contact
 For queries or collaboration, feel free to connect.
 
----
+OREOCHAIN – Secure. Decentralized. Trustless Document Storage.
 
-> **OREOCHAIN – Secure. Decentralized. Trustless Document Storage.**
+
+---
