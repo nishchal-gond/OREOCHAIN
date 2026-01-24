@@ -78,25 +78,27 @@ Make sure you have the following installed:
 ## ⚙️ Installation & Setup
 
 ### 1️⃣ Clone the Repository
-
+```bash
 git clone https://github.com/Rio2802/OREOCHAIN.git
+cd OREOCHAIN
 
-
-2️⃣ Install Dependencies
 npm install
+
 3️⃣ Deploy Smart Contract
-Open Remix IDE
+
+Open Remix IDE (online)
 
 Upload contract.sol
 
-Compile and deploy the contract
+Compile and deploy the smart contract
 
 Copy the deployed contract address
 
 4️⃣ Configure Frontend
+
 In app.js:
 
-Paste the contract address
+Paste the deployed contract address
 
 Configure:
 
@@ -107,89 +109,98 @@ Block explorer URL
 Ensure MetaMask is connected to the same network
 
 5️⃣ Configure IPFS
-Inside uploadToInfura() function in app.js, add:
+
+Inside the uploadToInfura() function in app.js, add:
 
 IPFS API Key
 
 IPFS API Secret
+(Infura or Pinata can be used as the IPFS provider)
+
 
 6️⃣ Run the Application
+
 Right-click index.html
 
 Open with Live Server
 
 Connect MetaMask wallet
 
-Select correct blockchain network
+Select the correct blockchain network
 
 📌 Usage Guide
 ➕ Add Exporter
+
 Click Add Exporter
 
-Enter exporter’s MetaMask address
+Enter the exporter’s MetaMask wallet address
 
-Confirm transaction
+Confirm the transaction via MetaMask
 
 📤 Upload Document
+
 Click Upload Document
 
-Select any file
+Select any file from your system
 
 The system will:
 
-Upload file to IPFS
+Upload the file to IPFS
 
-Generate an IPFS hash
+Generate a unique IPFS hash
 
 Store the hash on the blockchain
 
 📥 Retrieve Document
+
 Click Retrieve Document
 
 Enter the document hash
 
-File is fetched from IPFS and displayed
+The file is fetched from IPFS and displayed
 
 🏗️ System Architecture
-Frontend (HTML/JS)
+Frontend (HTML / JavaScript)
 │
-├── MetaMask Wallet
-├── IPFS (Infura/Pinata)
+├── MetaMask Wallet Integration
+├── IPFS (Infura / Pinata)
 │
 Smart Contract (Solidity)
 └── Stores IPFS Hashes on Blockchain
 
+
 🔒 Security Highlights
+
 Immutable blockchain records
 
 Content-addressed IPFS storage
 
 Wallet-based authentication
 
-No centralized database
+No centralized database or server
 
 🔮 Future Enhancements
+
 Role-based access control
 
 Multi-chain support
 
 File versioning
 
-Advanced encryption
+Advanced encryption mechanisms
 
 Improved UI/UX
 
 📜 License
+
 This project is licensed under the MIT License.
 
 🤝 Contributing
+
 Contributions are welcome.
 Fork the repository and submit pull requests.
 
 📬 Contact
+
 For queries or collaboration, feel free to connect.
 
-OREOCHAIN – Secure. Decentralized. Trustless Document Storage.
-
-
----
