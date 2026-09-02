@@ -1,15 +1,22 @@
 {
-  "name": "eth",
+  "name": "oreochain",
   "version": "1.0.0",
-  "main": "index.js",
+  "private": true,
+  "description": "Decentralized document storage using Ethereum smart contracts and IPFS, with on-chain hashes for tamper-proof verification.",
+  "author": "Nishchal Gond",
+  "license": "MIT",
+  "keywords": [
+    "blockchain",
+    "ethereum",
+    "ipfs",
+    "web3",
+    "decentralized-storage",
+    "document-verification"
+  ],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "web3": "^4.16.0"
-  },
-  "keywords": [],
-  "description": ""
+  }
 }
