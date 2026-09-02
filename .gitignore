@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+build/
+
+# Solidity / Truffle / Hardhat artifacts
+artifacts/
+cache/
+typechain-types/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
