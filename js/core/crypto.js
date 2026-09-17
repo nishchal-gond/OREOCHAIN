@@ -27,10 +27,14 @@
 
 import { concat, randomBytes, utf8, webcrypto } from "./bytes.js";
 import { DEFAULT_SUITE, getSuite } from "./suites.js";
+import { DEFAULT_KDF, deriveKeyEncryptionKey, kdfSpec } from "./kdf.js";
+
+// Re-exported so callers have one import for the passphrase path.
+export { deriveKeyEncryptionKey, kdfSpec, DEFAULT_KDF };
 
 export const ENVELOPE_VERSION = "oreochain-envelope-v1";
 
-/** OWASP's floor for PBKDF2-HMAC-SHA256 at the time of writing. */
+/** Kept for callers that still name PBKDF2 explicitly; see js/core/kdf.js. */
 export const DEFAULT_PBKDF2_ITERATIONS = 600000;
 
 const KEY_BITS = 256;
@@ -50,36 +54,10 @@ async function importAesKey(raw, usages) {
 }
 
 /**
- * Stretch a human passphrase into a key-encryption key.
- *
- * PBKDF2 is used because it is the only password KDF WebCrypto exposes
- * natively. It is memory-cheap and therefore weaker against GPU/ASIC attackers
- * than Argon2id — see docs/SECURITY.md for the planned upgrade path.
- */
-export async function deriveKeyEncryptionKey(
-  passphrase,
-  salt,
-  iterations = DEFAULT_PBKDF2_ITERATIONS
-) {
-  if (typeof passphrase !== "string" || passphrase.length === 0) {
-    throw new Error("a passphrase is required");
-  }
-  const subtle = webcrypto().subtle;
-  const material = await subtle.importKey("raw", utf8(passphrase), "PBKDF2", false, [
-    "deriveBits",
-  ]);
-  const bits = await subtle.deriveBits(
-    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
-    material,
-    KEY_BITS
-  );
-  return new Uint8Array(bits);
-}
-
-/**
  * Derive a purpose-specific subkey from the file key.
- * `info` domain-separates the derivations so the manifest key, chunk 0's key
- * and chunk 1's key are unrelated even though they share one input key.
+ *
+ * `info` domain-separates the derivations, so the manifest key, chunk 0's key
+ * and chunk 1's key are unrelated despite sharing one input key.
  */
 async function hkdf(fileKey, salt, info, bytes) {
   const subtle = webcrypto().subtle;
@@ -185,9 +163,13 @@ export async function decryptChunk(
   }
 }
 
-/** Seal the file key under the passphrase-derived KEK. */
-export async function wrapFileKey(fileKey, passphrase, kdfSalt, iterations) {
-  const kek = await deriveKeyEncryptionKey(passphrase, kdfSalt, iterations);
+/**
+ * Seal the file key under the passphrase-derived KEK.
+ *
+ * @param {object|string} kdf parameter set, see js/core/kdf.js
+ */
+export async function wrapFileKey(fileKey, passphrase, kdfSalt, kdf = DEFAULT_KDF) {
+  const kek = await deriveKeyEncryptionKey(passphrase, kdfSalt, kdf);
   const cryptoKey = await importAesKey(kek, ["encrypt"]);
   const iv = randomBytes(IV_BYTES);
   const sealed = await webcrypto().subtle.encrypt(
@@ -198,8 +180,8 @@ export async function wrapFileKey(fileKey, passphrase, kdfSalt, iterations) {
   return { iv, ciphertext: new Uint8Array(sealed) };
 }
 
-export async function unwrapFileKey(wrapped, passphrase, kdfSalt, iterations) {
-  const kek = await deriveKeyEncryptionKey(passphrase, kdfSalt, iterations);
+export async function unwrapFileKey(wrapped, passphrase, kdfSalt, kdf = DEFAULT_KDF) {
+  const kek = await deriveKeyEncryptionKey(passphrase, kdfSalt, kdf);
   const cryptoKey = await importAesKey(kek, ["decrypt"]);
   try {
     const opened = await webcrypto().subtle.decrypt(

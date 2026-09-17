@@ -36,7 +36,7 @@ So OREOCHAIN uses standard primitives, from the platform's own implementation:
 |---|---|
 | Chunk encryption | AES-256-GCM, XChaCha20-Poly1305, or both |
 | Key derivation | HKDF-SHA256 |
-| Passphrase stretching | PBKDF2-HMAC-SHA256, 600,000 iterations |
+| Passphrase stretching | Argon2id (46 MiB, 1 pass) — PBKDF2-SHA256 read-only for legacy files |
 | Content hashing | SHA-256 |
 | Integrity commitment | Merkle tree, domain-separated |
 
@@ -146,14 +146,54 @@ catastrophic break of AES-256, which no serious cryptographer expects. It is the
 right default for data that must stay secret for decades; it is overkill for a
 routine document.
 
-### 2.5 Envelope encryption
+### 2.5 Memory-hard passphrase stretching
+
+Every other defence here assumes the attacker does not have the file key. The
+file key is wrapped by a key derived from a human-chosen passphrase, and **the
+wrapped key is public** — it travels in the manifest. So an attacker who fetches
+a manifest can guess passphrases offline, at hardware speed, with no rate limit
+and nobody watching.
+
+That makes the cost of one guess the real security parameter. Not the cipher.
+AES-256 is irrelevant if `summer2024` takes a millisecond to test.
+
+PBKDF2 raises that cost by iterating, but it needs almost no memory, so a GPU
+runs thousands of guesses in parallel and an ASIC does far better. Argon2id is
+*memory-hard*: every guess must allocate and randomly traverse tens of megabytes,
+which is precisely the resource parallel hardware cannot cheaply multiply. The
+same attacker budget buys orders of magnitude fewer guesses.
+
+Argon2id specifically — rather than Argon2i or Argon2d — is the hybrid RFC 9106
+recommends by default: Argon2d's data-dependent addressing resists time-memory
+trade-offs but leaks through cache side channels, Argon2i is the reverse, and
+Argon2id takes one pass of each.
+
+The shipped profile is m=47104 KiB, t=1, p=1, an OWASP-recommended setting. It
+costs roughly 0.7s in the browser, which is the ceiling worth paying while the
+derivation blocks the UI thread; a server can afford more memory and should use
+it. Implementation correctness is checked against the **RFC 9106 §5.3 known-answer
+vector** in `test/kdf.test.js` — a subtly wrong KDF still produces
+plausible-looking bytes and silently provides a fraction of the intended
+strength.
+
+Parameters travel with the file, and are bounded in both directions. Below the
+floor, whoever serves the manifest could set memory to 8 KiB and make cracking
+as cheap as it was before Argon2id existed, with the file still opening normally
+so nothing would look wrong. Above the ceiling, a manifest demanding 8 GiB turns
+opening a file into a denial of service against the reader.
+
+PBKDF2 remains readable so that files sealed before this change still open.
+Losing them would be unrecoverable, since there is no path to the plaintext
+without the key.
+
+### 2.6 Envelope encryption
 
 The passphrase never encrypts data. It derives a key-encryption key that wraps a
 random per-file key:
 
 ```
 fileKey        = 32 random bytes
-KEK            = PBKDF2-SHA256(passphrase, kdfSalt, 600000)
+KEK            = Argon2id(passphrase, kdfSalt, m=47104KiB, t=1, p=1)
 wrappedFileKey = AES-256-GCM(KEK, fileKey)
 ```
 
@@ -163,7 +203,7 @@ random file key), so identical documents are not linkable in storage — while t
 public file hash and Merkle root still match, so the chain recognises them as
 the same document.
 
-### 2.6 Manifest confidentiality
+### 2.7 Manifest confidentiality
 
 The manifest splits into a public header and an encrypted body:
 
@@ -195,7 +235,7 @@ Each downloaded chunk passes three independent checks:
 Then the reassembled file's SHA-256 and length are compared to the manifest.
 Any mismatch raises; partial or "best effort" output is never returned.
 
-### 2.7 Manifests are treated as hostile input
+### 2.8 Manifests are treated as hostile input
 
 A manifest arrives from whatever storage served its CID. Anyone who can serve
 those bytes — a hostile gateway, a compromised pinning service, a network
@@ -208,7 +248,8 @@ The interesting attacks there never reach the crypto at all:
 |---|---|---|
 | `totalChunks: 4e9` | restore loop hangs | bounded chunk count |
 | `fileSize: 1e15` | allocation kills the process | bounded size, consistency check |
-| `kdf.iterations: 1` | passphrase cracking becomes free | floor of 600,000 enforced |
+| `kdf.memoryKiB: 8` | passphrase cracking becomes cheap again | floor of 19,456 KiB enforced |
+| `kdf.memoryKiB: 8GiB` | opening a file becomes a denial of service | ceiling enforced |
 | `kdf.iterations: 1e12` | client hangs in PBKDF2 | ceiling enforced |
 | `__proto__` key | prototype pollution | rejected outright, not sanitised |
 | `location: "../../etc/passwd"` | path traversal / request forgery | strict alphanumeric pattern |
@@ -218,7 +259,7 @@ The interesting attacks there never reach the crypto at all:
 used, and `js/core/limits.js` makes every bound explicit and overridable, rather
 than leaving it implied by whatever the machine happens to tolerate.
 
-### 2.8 The gateway never holds a key
+### 2.9 The gateway never holds a key
 
 `server/` sits between users and the pinning provider so the pinning credential
 never reaches a browser — a browser cannot keep a secret, and any token shipped
@@ -269,10 +310,13 @@ an audit.
   the page; malware or a malicious extension sees plaintext and the passphrase.
 - **Weak passphrases fall to offline attack.** PBKDF2 raises the cost per guess,
   it does not make a six-character passphrase safe. The wrapped key is public.
-- **PBKDF2 is memory-cheap**, so a GPU or ASIC attacker gets far more guesses per
-  dollar than your CPU does. Argon2id is the correct primitive; WebCrypto does
-  not expose it, so adopting it needs an audited WASM build. This is the single
-  most valuable upgrade to the current design — see below.
+- **Argon2id still cannot rescue a genuinely weak passphrase.** It raises the
+  cost per guess by orders of magnitude; it does not make `password1` safe. The
+  wrapped key is public, so a short passphrase remains the most likely way an
+  attacker gets in.
+- **Key derivation blocks the UI thread.** The implementation is pure
+  JavaScript, so a browser tab is unresponsive for roughly a second while it
+  runs, and longer on a low-end phone. Moving it to a Web Worker is the fix.
 - **Revocation does not delete anything.** `revokeDocument` clears the on-chain
   record. Chunks already pinned remain wherever they were pinned. Treat any
   upload as permanent.
@@ -304,9 +348,10 @@ an audit.
    treated as public forever — rotate it, don't just delete it.
 2. **Keep `js/config.js` out of version control.** It is gitignored. Only
    `js/config.example.js` is committed.
-3. **Do not lower `iterations` below 600,000.** It is the OWASP floor for
-   PBKDF2-HMAC-SHA256 and the only thing standing between a weak passphrase and
-   an offline attacker.
+3. **Do not lower the Argon2id memory below 19,456 KiB.** It is the OWASP floor
+   and the main thing standing between a weak passphrase and an offline
+   attacker. Raise it server-side, where a slower derivation costs nobody a
+   frozen tab.
 4. **Deploy the contract yourself and set the owner to a wallet you control.**
    The owner controls the exporter allowlist.
 5. **Serve over HTTPS.** WebCrypto is unavailable on insecure origins, and the
@@ -316,9 +361,8 @@ an audit.
 
 ## 6. Roadmap, in priority order
 
-1. **Argon2id for passphrase stretching** (via an audited WASM build), keeping
-   PBKDF2 for backward compatibility. Highest-value change: it directly
-   addresses the weakest link, which is human-chosen passphrases.
+1. **Move key derivation to a Web Worker**, so a memory-hard KDF does not
+   freeze the tab and stronger parameters become affordable.
 2. **A backend pinning proxy** so credentials leave the browser entirely, plus
    rate limiting and per-user quotas.
 3. **Multi-recipient key wrapping** — wrap the file key to several public keys so

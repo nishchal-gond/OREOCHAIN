@@ -47,7 +47,6 @@ import {
   chunkAad,
   decryptChunk,
   deriveManifestKey,
-  DEFAULT_PBKDF2_ITERATIONS,
   encryptChunk,
   ENVELOPE_VERSION,
   generateFileKey,
@@ -58,6 +57,7 @@ import {
   wrapFileKey,
 } from "./crypto.js";
 import { DEFAULT_SUITE, getSuite } from "./suites.js";
+import { DEFAULT_KDF, kdfSpec } from "./kdf.js";
 import { MANIFEST_LIMITS, NETWORK_LIMITS } from "./limits.js";
 import {
   assertWithinBudget,
@@ -79,8 +79,8 @@ const MANIFEST_AAD = `${ENVELOPE_VERSION}/manifest-body`;
  * @param {string} [options.mimeType]
  * @param {string|null} [options.passphrase] omit or pass null to store in the clear
  * @param {string} [options.suite] cipher suite name, see js/core/suites.js
+ * @param {object|string} [options.kdf] passphrase KDF, see js/core/kdf.js
  * @param {number} [options.chunkSize]
- * @param {number} [options.iterations] PBKDF2 iterations
  * @param {(done:number,total:number)=>void} [options.onProgress]
  * @returns {Promise<object>} a packed file, ready for the caller to upload
  */
@@ -91,12 +91,14 @@ export async function packFile(fileBytes, options = {}) {
     passphrase = null,
     suite = DEFAULT_SUITE,
     chunkSize = DEFAULT_CHUNK_SIZE,
-    iterations = DEFAULT_PBKDF2_ITERATIONS,
+    kdf = DEFAULT_KDF,
     onProgress,
   } = options;
 
   const encrypted = typeof passphrase === "string" && passphrase.length > 0;
-  if (encrypted) getSuite(suite); // fail fast on an unknown suite name
+  // Fail fast on an unknown suite or KDF, before doing any expensive work.
+  const kdfParams = encrypted ? kdfSpec(kdf) : null;
+  if (encrypted) getSuite(suite);
 
   const plainChunks = splitIntoChunks(fileBytes, chunkSize);
   const totalChunks = plainChunks.length;
@@ -155,7 +157,7 @@ export async function packFile(fileBytes, options = {}) {
     _fileKey: fileKey,
     _fileSalt: fileSalt,
     _kdfSalt: kdfSalt,
-    _iterations: iterations,
+    _kdf: kdfParams,
     _passphrase: passphrase,
   };
 }
@@ -209,13 +211,11 @@ export async function sealManifest(packed, locations) {
       packed._fileKey,
       packed._passphrase,
       packed._kdfSalt,
-      packed._iterations
+      packed._kdf
     );
-    header.kdf = {
-      name: "PBKDF2-SHA256",
-      iterations: packed._iterations,
-      salt: toBase64(packed._kdfSalt),
-    };
+    // The full parameter set travels with the file: a reader must reproduce the
+    // derivation exactly, and hardcoding it would strand files on one setting.
+    header.kdf = { ...packed._kdf, salt: toBase64(packed._kdfSalt) };
     header.fileSalt = toBase64(packed._fileSalt);
     header.wrappedKey = {
       iv: toBase64(wrapped.iv),
@@ -270,7 +270,7 @@ export async function openManifest(manifest, passphrase = null, options = {}) {
     },
     passphrase,
     kdfSalt,
-    manifest.kdf.iterations
+    manifest.kdf
   );
 
   const fileSalt = fromBase64(manifest.fileSalt);

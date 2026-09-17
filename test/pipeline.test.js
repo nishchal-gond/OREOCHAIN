@@ -12,13 +12,18 @@ import {
 } from "../js/core/manifest.js";
 import { splitIntoChunks } from "../js/core/chunker.js";
 
+// Argon2id at production settings costs ~0.7s per derivation, which would make
+// this suite take minutes. Tests declare cheap parameters explicitly, and a
+// matching floor, rather than silently inheriting defaults.
+const TEST_KDF = { name: "argon2id", memoryKiB: 8, iterations: 1, parallelism: 1 };
+
 const PASSPHRASE = "a-long-enough-test-passphrase";
 const FAST = 1000; // keep PBKDF2 cheap in tests
 
 // Manifests made with FAST would be rejected by the production floor of 600k
 // iterations, which is exactly what that check is for. Tests opt into a lower
 // floor explicitly rather than weakening the validator.
-const TEST_LIMITS = { minIterations: FAST };
+const TEST_LIMITS = { minArgon2MemoryKiB: 8 };
 
 /** An in-memory stand-in for IPFS: content-addressed put/get. */
 function memoryStore() {
@@ -51,7 +56,7 @@ async function roundTrip(data, options = {}) {
     mimeType: "application/octet-stream",
     passphrase: PASSPHRASE,
     chunkSize: 1024,
-    iterations: FAST,
+    kdf: TEST_KDF,
     ...options,
   });
   const manifest = await storeAll(packed, store);
@@ -211,7 +216,7 @@ test("sealManifest refuses a mismatched number of locations", async () => {
   const packed = await packFile(randomBytes(3000), {
     passphrase: PASSPHRASE,
     chunkSize: 1024,
-    iterations: FAST,
+    kdf: TEST_KDF,
   });
   await assert.rejects(() => sealManifest(packed, ["only-one"]), /expected 3 chunk locations/);
   await assert.rejects(() => sealManifest(packed, null), /expected 3 chunk locations/);

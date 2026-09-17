@@ -52,8 +52,26 @@ window.OREOCHAIN_CONFIG = {
     // Bytes per chunk. 256 KiB matches the IPFS block size.
     chunkSize: 262144,
 
-    // PBKDF2 iterations for passphrase stretching. Higher is slower to attack
-    // and slower to unlock. Do not reduce below 600000.
-    iterations: 600000,
+    // Passphrase key derivation.
+    //
+    // This is the setting that actually protects a weak passphrase. The
+    // wrapped file key travels in the manifest, so an attacker who fetches one
+    // guesses offline at hardware speed — the cost of a single guess is the
+    // whole defence.
+    //
+    // Argon2id is memory-hard: every guess must allocate and traverse this
+    // much memory, which is what a GPU or ASIC cannot cheaply multiply.
+    // 47104 KiB / 1 pass is an OWASP-recommended profile and costs roughly
+    // 0.7s in the browser. Raise memoryKiB on a server, where blocking a
+    // thread for longer is acceptable.
+    //
+    // "pbkdf2-sha256" is still readable so files sealed before this change
+    // still open, but it is memory-cheap and should not be chosen for new files.
+    kdf: {
+      name: "argon2id",
+      memoryKiB: 47104,
+      iterations: 1,
+      parallelism: 1,
+    },
   },
 };
