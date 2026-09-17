@@ -36,6 +36,7 @@ import {
 import {
   DEFAULT_CHUNK_SIZE,
   hashChunks,
+  leafHash,
   merkleProof,
   merkleRoot,
   sha256,
@@ -57,6 +58,14 @@ import {
   wrapFileKey,
 } from "./crypto.js";
 import { DEFAULT_SUITE, getSuite } from "./suites.js";
+import { MANIFEST_LIMITS, NETWORK_LIMITS } from "./limits.js";
+import {
+  assertWithinBudget,
+  ManifestError,
+  parseManifestJson,
+  validateManifestBody,
+  validateManifestHeader,
+} from "./validate.js";
 
 export const MANIFEST_VERSION = "oreochain-manifest-v1";
 const MANIFEST_AAD = `${ENVELOPE_VERSION}/manifest-body`;
@@ -231,18 +240,27 @@ export async function sealManifest(packed, locations) {
  * Recover the file key and the chunk table from a manifest.
  * For an encrypted manifest this is where a wrong passphrase is caught.
  */
-export async function openManifest(manifest, passphrase = null) {
-  if (!manifest || manifest.version !== MANIFEST_VERSION) {
-    throw new Error(`unsupported manifest version: ${manifest && manifest.version}`);
+export async function openManifest(manifest, passphrase = null, options = {}) {
+  const { limits = {} } = options;
+
+  validateManifestHeader(manifest, limits);
+  if (manifest.version !== MANIFEST_VERSION) {
+    throw new ManifestError(`unsupported version: ${manifest.version}`);
   }
 
   if (!manifest.encrypted) {
-    return { fileKey: null, fileSalt: null, body: manifest.body };
+    return {
+      fileKey: null,
+      fileSalt: null,
+      body: validateManifestBody(manifest.body, manifest, limits),
+    };
   }
 
   if (typeof passphrase !== "string" || passphrase.length === 0) {
     throw new Error("this file is encrypted — a passphrase is required");
   }
+
+  getSuite(manifest.suite); // reject an unknown suite before doing PBKDF2 work
 
   const kdfSalt = fromBase64(manifest.kdf.salt);
   const fileKey = await unwrapFileKey(
@@ -259,7 +277,26 @@ export async function openManifest(manifest, passphrase = null) {
   const derived = await deriveManifestKey(fileKey, fileSalt);
   const plain = await openWithDerivedKey(fromBase64(manifest.body), derived, MANIFEST_AAD);
 
-  return { fileKey, fileSalt, body: JSON.parse(fromUtf8(plain)) };
+  let body;
+  try {
+    body = JSON.parse(fromUtf8(plain));
+  } catch (error) {
+    throw new ManifestError(`decrypted body is not valid JSON (${error.message})`);
+  }
+
+  return { fileKey, fileSalt, body: validateManifestBody(body, manifest, limits) };
+}
+
+/**
+ * Parse and validate a manifest fetched from storage.
+ *
+ * Always use this on bytes that came off the network — it is the only entry
+ * point that treats the manifest as hostile input.
+ */
+export function readManifest(bytes, options = {}) {
+  const text = typeof bytes === "string" ? bytes : fromUtf8(bytes);
+  const manifest = parseManifestJson(text);
+  return validateManifestHeader(manifest, options.limits || {});
 }
 
 /**
@@ -280,58 +317,21 @@ export async function openManifest(manifest, passphrase = null) {
  * @param {(done:number,total:number)=>void} [options.onProgress]
  */
 export async function restoreFile(manifest, opened, fetchChunk, options = {}) {
-  const { expectedMerkleRoot, onProgress } = options;
-  const entries = [...opened.body.chunks].sort((a, b) => a.index - b.index);
+  const { expectedMerkleRoot, onProgress, limits = {} } = options;
 
-  if (entries.length !== manifest.totalChunks) {
-    throw new Error(
-      `manifest lists ${entries.length} chunks but declares ${manifest.totalChunks}`
-    );
-  }
-  entries.forEach((entry, i) => {
-    if (entry.index !== i) throw new Error(`chunk table has a gap at index ${i}`);
-  });
+  validateManifestHeader(manifest, limits);
+  assertWithinBudget(manifest.fileSize, limits);
 
   const plainChunks = [];
-  for (const entry of entries) {
-    const payload = await fetchChunk(entry.location, entry);
-
-    const payloadHash = await sha256(payload);
-    if (!equalBytes(payloadHash, fromHex(entry.payloadHash))) {
-      throw new Error(
-        `chunk ${entry.index} does not match its recorded hash — the stored block was altered`
-      );
-    }
-
-    const plain = manifest.encrypted
-      ? await decryptChunk(
-          payload,
-          opened.fileKey,
-          opened.fileSalt,
-          entry.index,
-          chunkAad(manifest.fileHash, entry.index, manifest.totalChunks),
-          manifest.suite || DEFAULT_SUITE
-        )
-      : payload;
-
-    plainChunks.push(plain);
-    if (onProgress) onProgress(plainChunks.length, entries.length);
-  }
-
-  const leaves = await hashChunks(plainChunks);
-  const root = await merkleRoot(leaves);
-  const rootHex = to0x(root);
-
-  if (rootHex !== manifest.merkleRoot) {
-    throw new Error("reassembled Merkle root does not match the manifest");
-  }
-  if (expectedMerkleRoot && rootHex !== expectedMerkleRoot.toLowerCase()) {
-    throw new Error(
-      "reassembled Merkle root does not match the root recorded on-chain — this file is not the registered document"
-    );
+  for await (const chunk of restoreFileStream(manifest, opened, fetchChunk, options)) {
+    plainChunks.push(chunk.bytes);
+    if (onProgress) onProgress(plainChunks.length, manifest.totalChunks);
   }
 
   const bytes = concat(...plainChunks);
+
+  // The stream already verified every chunk and the Merkle root. These two
+  // checks cover the whole-file invariants a per-chunk pass cannot see.
   const fileHashHex = to0x(await sha256(bytes));
   if (fileHashHex !== manifest.fileHash) {
     throw new Error("reassembled file hash does not match the manifest");
@@ -345,8 +345,141 @@ export async function restoreFile(manifest, opened, fetchChunk, options = {}) {
     fileName: opened.body.fileName,
     mimeType: opened.body.mimeType,
     fileHash: fileHashHex,
-    merkleRoot: rootHex,
+    merkleRoot: expectedMerkleRoot ? expectedMerkleRoot.toLowerCase() : manifest.merkleRoot,
   };
+}
+
+/**
+ * Fetch, verify and decrypt chunks, yielding verified plaintext in order
+ * without ever holding the whole file.
+ *
+ * This is what a server should use: a 4 GB download costs a bounded window of
+ * memory rather than 4 GB of it. Chunks are fetched `concurrency` at a time and
+ * yielded strictly in order, so the consumer can pipe them straight to a
+ * response.
+ *
+ * Verification is identical to restoreFile() except for the whole-file SHA-256,
+ * which cannot be computed incrementally with WebCrypto. That loses nothing:
+ * the Merkle root is checked before the final chunk is yielded, and the root
+ * commits to every chunk's content and position, so it is an equally complete
+ * statement about the bytes.
+ *
+ * @param {object} manifest validated manifest header
+ * @param {object} opened result of openManifest
+ * @param {(location:string, entry:object, ctx:object)=>Promise<Uint8Array>} fetchChunk
+ * @param {object} [options]
+ * @param {string} [options.expectedMerkleRoot] the on-chain root
+ * @param {number} [options.concurrency] chunks in flight
+ * @param {AbortSignal} [options.signal] cancels in-flight and pending fetches
+ */
+export async function* restoreFileStream(manifest, opened, fetchChunk, options = {}) {
+  const {
+    expectedMerkleRoot,
+    concurrency = NETWORK_LIMITS.concurrency,
+    signal,
+    limits = {},
+  } = options;
+
+  validateManifestHeader(manifest, limits);
+  const entries = [...opened.body.chunks].sort((a, b) => a.index - b.index);
+  entries.forEach((entry, i) => {
+    if (entry.index !== i) throw new ManifestError(`chunk table has a gap at index ${i}`);
+  });
+
+  const width = Math.max(1, Math.min(concurrency, entries.length));
+  const inFlight = new Map();
+  const leaves = [];
+
+  const start = (index) => {
+    if (index >= entries.length || inFlight.has(index)) return;
+    const pending = fetchAndVerify(manifest, opened, entries[index], fetchChunk, signal);
+    // A look-ahead fetch can reject before the consumer reaches that index —
+    // a tampered chunk 5 rejects while chunk 0 is still being yielded. Without
+    // a handler attached now, that surfaces as an unhandled rejection and can
+    // tear down the process instead of failing this call. Attaching a no-op
+    // handler marks it handled; awaiting the original below still throws.
+    pending.catch(() => {});
+    inFlight.set(index, pending);
+  };
+
+  for (let i = 0; i < width; i++) start(i);
+
+  try {
+    for (let index = 0; index < entries.length; index++) {
+      throwIfAborted(signal);
+
+      const pending = inFlight.get(index);
+      inFlight.delete(index);
+      const plain = await pending;
+
+      start(index + width);
+
+      leaves.push(await leafHash(plain));
+      yield { index, bytes: plain, entry: entries[index] };
+    }
+
+    const rootHex = to0x(await merkleRoot(leaves));
+    if (rootHex !== manifest.merkleRoot) {
+      throw new Error("reassembled Merkle root does not match the manifest");
+    }
+    if (expectedMerkleRoot && rootHex !== expectedMerkleRoot.toLowerCase()) {
+      throw new Error(
+        "reassembled Merkle root does not match the root recorded on-chain — this file is not the registered document"
+      );
+    }
+  } finally {
+    inFlight.clear();
+  }
+}
+
+function throwIfAborted(signal) {
+  if (signal && signal.aborted) {
+    const error = new Error("operation aborted");
+    error.name = "AbortError";
+    throw error;
+  }
+}
+
+/** One chunk: fetch, check the stored hash, authenticate, decrypt, size-check. */
+async function fetchAndVerify(manifest, opened, entry, fetchChunk, signal) {
+  throwIfAborted(signal);
+
+  const payload = await fetchChunk(entry.location, entry, { signal });
+
+  if (!(payload instanceof Uint8Array)) {
+    throw new Error(`chunk ${entry.index}: fetch returned ${typeof payload}, expected bytes`);
+  }
+  if (payload.length !== entry.storedSize) {
+    throw new Error(
+      `chunk ${entry.index} is ${payload.length} bytes but the manifest declares ${entry.storedSize}`
+    );
+  }
+
+  const payloadHash = await sha256(payload);
+  if (!equalBytes(payloadHash, fromHex(entry.payloadHash))) {
+    throw new Error(
+      `chunk ${entry.index} does not match its recorded hash — the stored block was altered`
+    );
+  }
+
+  const plain = manifest.encrypted
+    ? await decryptChunk(
+        payload,
+        opened.fileKey,
+        opened.fileSalt,
+        entry.index,
+        chunkAad(manifest.fileHash, entry.index, manifest.totalChunks),
+        manifest.suite || DEFAULT_SUITE
+      )
+    : payload;
+
+  if (plain.length !== entry.plainSize) {
+    throw new Error(
+      `chunk ${entry.index} decrypted to ${plain.length} bytes but the manifest declares ${entry.plainSize}`
+    );
+  }
+
+  return plain;
 }
 
 /**

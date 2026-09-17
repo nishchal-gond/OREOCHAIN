@@ -22,19 +22,25 @@ window.OREOCHAIN_CONFIG = {
     //            readable by anyone who opens the page — local development only.
     mode: "backend",
 
-    // backend mode: your upload endpoint. It should accept multipart/form-data
-    // with a "file" field and respond with { "cid": "..." }.
+    // backend mode: your gateway's upload endpoint. It receives raw bytes
+    // (application/octet-stream) and responds with { "cid": "..." }.
+    // Run one with `npm start` — see server/README.md.
     endpoint: "/api/storage/pin",
 
     // direct mode only. Leave null in any deployed environment.
     jwt: null,
 
-    // Read gateways, tried in order.
+    // Read gateways, tried in order. Each is retried on transient failures
+    // before moving to the next. Point these at your own gateway
+    // ("/api/storage/") to keep every request on one origin.
     gateways: [
       "https://ipfs.io/ipfs/",
       "https://cloudflare-ipfs.com/ipfs/",
       "https://gateway.pinata.cloud/ipfs/",
     ],
+
+    // Retry policy for transient network failures.
+    retry: { maxAttempts: 4, backoffBaseMs: 250 },
   },
 
   crypto: {

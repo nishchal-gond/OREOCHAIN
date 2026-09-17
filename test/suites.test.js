@@ -20,6 +20,7 @@ import {
 import { openManifest, packFile, restoreFile, sealManifest } from "../js/core/manifest.js";
 
 const ALL = Object.keys(SUITES);
+const TEST_LIMITS = { minIterations: 1000 };
 const AAD = chunkAad("0xfeedface", 2, 9);
 
 test("the default suite is hardware-accelerated AES", () => {
@@ -154,9 +155,10 @@ test("a full file round-trips under every suite", async () => {
 
     assert.equal(manifest.suite, name);
 
-    const opened = await openManifest(manifest, "suite-test-passphrase");
+    const opened = await openManifest(manifest, "suite-test-passphrase", { limits: TEST_LIMITS });
     const restored = await restoreFile(manifest, opened, (loc) => blocks.get(loc), {
       expectedMerkleRoot: manifest.merkleRoot,
+      limits: TEST_LIMITS,
     });
 
     assert.ok(equalBytes(restored.bytes, data), `round trip failed for ${name}`);

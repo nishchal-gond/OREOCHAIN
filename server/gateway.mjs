@@ -1,0 +1,341 @@
+/**
+ * The OREOCHAIN gateway: an HTTP service that sits between your users and your
+ * pinning provider.
+ *
+ * It exists so that the pinning credential never reaches a browser. Users
+ * authenticate to this service; this service authenticates to the provider. It
+ * also gives you the things a browser cannot enforce for you — rate limits,
+ * quotas, request size caps, and an audit point where every upload is visible.
+ *
+ * What it deliberately does NOT do: decrypt anything. Chunks arrive already
+ * encrypted by the client, and this process never sees a passphrase or a file
+ * key. A full compromise of this server exposes ciphertext and traffic patterns,
+ * not documents. Keep it that way — it is the property that makes the service
+ * safe to operate on someone else's behalf.
+ *
+ * Endpoints:
+ *   GET  /health                 liveness, unauthenticated
+ *   POST /api/storage/pin        store one chunk (raw body) -> { cid }
+ *   GET  /api/storage/<cid>      retrieve one chunk
+ */
+
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import path from "node:path";
+
+import { authenticate } from "./auth.mjs";
+import { createRateLimiter } from "./ratelimit.mjs";
+
+const CID_ROUTE = /^\/api\/storage\/([A-Za-z0-9_-]{1,512})$/;
+
+const STATIC_TYPES = new Map([
+  [".html", "text/html; charset=utf-8"],
+  [".js", "text/javascript; charset=utf-8"],
+  [".mjs", "text/javascript; charset=utf-8"],
+  [".css", "text/css; charset=utf-8"],
+  [".json", "application/json; charset=utf-8"],
+  [".svg", "image/svg+xml"],
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".ico", "image/x-icon"],
+  [".mp4", "video/mp4"],
+  [".woff2", "font/woff2"],
+]);
+
+function securityHeaders(res) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  // The app needs WebCrypto and talks to this origin plus IPFS gateways.
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; " +
+      "connect-src 'self' https:; style-src 'self' 'unsafe-inline' https:; " +
+      "script-src 'self' https:; font-src 'self' https: data:; object-src 'none'; " +
+      "base-uri 'none'; frame-ancestors 'none'"
+  );
+}
+
+function sendJson(res, status, payload, { close = false } = {}) {
+  const body = JSON.stringify(payload);
+  const headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+  };
+  // When we stop reading a request early, the connection cannot be reused:
+  // the unread body would be parsed as the next request. Closing it is also
+  // what lets the client actually receive this response instead of a reset.
+  if (close) headers.Connection = "close";
+  res.writeHead(status, headers);
+  res.end(body);
+}
+
+function applyCors(req, res, config) {
+  const origin = req.headers.origin;
+  if (!origin || config.allowedOrigins.length === 0) return true;
+
+  if (!config.allowedOrigins.includes(origin)) {
+    // Not an error for a normal request — simply no CORS grant, so a browser
+    // will refuse to expose the response to the calling page.
+    return false;
+  }
+
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Chunk-Name");
+  res.setHeader("Access-Control-Max-Age", "600");
+  return true;
+}
+
+/**
+ * Read a request body with a hard cap.
+ *
+ * The cap is enforced as bytes arrive, not after buffering, so a client cannot
+ * make the process allocate more than the limit no matter what Content-Length
+ * claims. A client that lies is disconnected rather than served an error, since
+ * continuing to read is exactly what the attack wants.
+ */
+function readBody(req, { maxBytes, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      const error = new Error(`body exceeds ${maxBytes} bytes`);
+      error.status = 413;
+      error.stopReading = true;
+      reject(error);
+      return;
+    }
+
+    const parts = [];
+    let received = 0;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      req.pause();
+      finish(
+        Object.assign(new Error("request body timed out"), { status: 408, stopReading: true })
+      );
+    }, timeoutMs);
+
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      error ? reject(error) : resolve(value);
+    }
+
+    req.on("data", (part) => {
+      received += part.length;
+      if (received > maxBytes) {
+        // Stop accumulating immediately — the cap must bound memory, not just
+        // the reported result. Pause rather than destroy so the 413 can still
+        // be written; the handler closes the connection afterwards.
+        parts.length = 0;
+        req.pause();
+        finish(
+          Object.assign(new Error(`body exceeds ${maxBytes} bytes`), {
+            status: 413,
+            stopReading: true,
+          })
+        );
+        return;
+      }
+      parts.push(part);
+    });
+
+    req.on("end", () => finish(null, Buffer.concat(parts, received)));
+    req.on("error", (error) => finish(error));
+    req.on("aborted", () =>
+      finish(Object.assign(new Error("client aborted the request"), { status: 400 }))
+    );
+  });
+}
+
+function chunkName(req) {
+  const raw = req.headers["x-chunk-name"];
+  if (typeof raw !== "string") return "chunk";
+  try {
+    // Keep only characters that are safe as an upstream metadata label.
+    return decodeURIComponent(raw).replace(/[^A-Za-z0-9._-]/g, "").slice(0, 128) || "chunk";
+  } catch {
+    return "chunk";
+  }
+}
+
+async function serveStatic(req, res, root) {
+  const url = new URL(req.url, "http://localhost");
+  const requested = url.pathname === "/" ? "/index.html" : url.pathname;
+
+  // Resolve, then confirm the result is still inside the root. This is the only
+  // reliable traversal check: it catches encoded dots, symlinked paths and
+  // anything else a cleverer string filter would miss.
+  const resolved = path.resolve(root, "." + path.posix.normalize(requested));
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    sendJson(res, 403, { error: "forbidden" });
+    return true;
+  }
+
+  let info;
+  try {
+    info = await stat(resolved);
+  } catch {
+    return false;
+  }
+  if (!info.isFile()) return false;
+
+  res.writeHead(200, {
+    "Content-Type": STATIC_TYPES.get(path.extname(resolved).toLowerCase()) || "application/octet-stream",
+    "Content-Length": info.size,
+    "Cache-Control": "no-cache",
+  });
+  createReadStream(resolved).pipe(res);
+  return true;
+}
+
+/**
+ * Build the request handler.
+ *
+ * @param {object} config from loadConfig()
+ * @param {object} backend from createBackend()
+ * @param {object} [deps] injectable for testing
+ */
+export function createHandler(config, backend, deps = {}) {
+  const limiter =
+    deps.limiter ||
+    createRateLimiter({ perMinute: config.rateLimitPerMinute, burst: config.rateLimitBurst });
+
+  const staticRoot = config.serveStatic
+    ? path.resolve(deps.staticRoot || path.resolve(process.cwd()))
+    : null;
+
+  const log = deps.log || ((entry) => console.log(JSON.stringify(entry)));
+
+  // Idle rate-limit buckets are swept periodically so memory stays bounded.
+  const sweeper = deps.sweeper === false ? null : setInterval(() => limiter.sweep(), 600000);
+  if (sweeper && typeof sweeper.unref === "function") sweeper.unref();
+
+  return async function handle(req, res) {
+    const started = Date.now();
+    securityHeaders(res);
+
+    let url;
+    try {
+      url = new URL(req.url, "http://localhost");
+    } catch {
+      sendJson(res, 400, { error: "malformed request URL" });
+      return;
+    }
+
+    const corsOk = applyCors(req, res, config);
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(corsOk ? 204 : 403).end();
+      return;
+    }
+
+    try {
+      if (url.pathname === "/health" && req.method === "GET") {
+        sendJson(res, 200, { status: "ok", storage: backend.name, uptime: process.uptime() });
+        return;
+      }
+
+      const isApi = url.pathname.startsWith("/api/");
+
+      if (isApi) {
+        if (!corsOk) {
+          sendJson(res, 403, { error: "origin not allowed" });
+          return;
+        }
+
+        const auth = authenticate(req, config);
+        if (!auth.ok) {
+          // A uniform message avoids telling an attacker which part was wrong.
+          res.setHeader("WWW-Authenticate", 'Bearer realm="oreochain"');
+          sendJson(res, 401, { error: "unauthorized" });
+          log({ event: "auth_failed", reason: auth.reason, path: url.pathname });
+          return;
+        }
+
+        const quota = limiter.take(auth.keyId);
+        if (!quota.allowed) {
+          res.setHeader("Retry-After", String(quota.retryAfterSeconds));
+          sendJson(res, 429, {
+            error: "rate limit exceeded",
+            retryAfterSeconds: quota.retryAfterSeconds,
+          });
+          log({ event: "rate_limited", keyId: auth.keyId });
+          return;
+        }
+
+        if (url.pathname === "/api/storage/pin" && req.method === "POST") {
+          const body = await readBody(req, {
+            maxBytes: config.maxChunkBytes,
+            timeoutMs: config.readTimeoutMs,
+          });
+          if (body.length === 0) {
+            sendJson(res, 400, { error: "empty body" });
+            return;
+          }
+
+          const cid = await backend.put(body, chunkName(req));
+          sendJson(res, 200, { cid });
+          log({
+            event: "pin",
+            keyId: auth.keyId,
+            bytes: body.length,
+            cid,
+            ms: Date.now() - started,
+          });
+          return;
+        }
+
+        const match = CID_ROUTE.exec(url.pathname);
+        if (match && req.method === "GET") {
+          const bytes = await backend.get(match[1]);
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": bytes.length,
+            "Cache-Control": "public, max-age=31536000, immutable",
+          });
+          res.end(Buffer.from(bytes));
+          log({ event: "fetch", keyId: auth.keyId, cid: match[1], bytes: bytes.length });
+          return;
+        }
+
+        sendJson(res, 404, { error: "no such endpoint" });
+        return;
+      }
+
+      if (staticRoot && req.method === "GET" && (await serveStatic(req, res, staticRoot))) return;
+
+      sendJson(res, 404, { error: "not found" });
+    } catch (error) {
+      const status = Number.isInteger(error.status) ? error.status : 500;
+      // Internal details go to the log, never to the client — an error message
+      // is a fine place to leak a credential or an internal hostname.
+      log({
+        event: "error",
+        status,
+        path: url.pathname,
+        message: error.message,
+        upstreamStatus: error.upstreamStatus,
+      });
+      if (!res.headersSent) {
+        sendJson(
+          res,
+          status,
+          { error: status === 500 ? "internal error" : error.message },
+          { close: Boolean(error.stopReading) }
+        );
+      } else {
+        res.destroy();
+      }
+    }
+  };
+}
+
+export const _internals = { readBody, chunkName, serveStatic, CID_ROUTE };

@@ -14,6 +14,8 @@
     "document-verification"
   ],
   "scripts": {
+    "start": "node server/index.mjs",
+    "dev": "OREOCHAIN_STORAGE=memory OREOCHAIN_SERVE_STATIC=true OREOCHAIN_ALLOW_ANONYMOUS=true node server/index.mjs",
     "test": "node --test test/*.test.js",
     "abi": "node scripts/generate-abi.mjs"
   },
@@ -26,5 +28,8 @@
     "@ethereumjs/evm": "^3.1.0",
     "@ethereumjs/util": "^9.1.0",
     "solc": "0.8.26"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

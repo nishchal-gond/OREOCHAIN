@@ -195,6 +195,47 @@ Each downloaded chunk passes three independent checks:
 Then the reassembled file's SHA-256 and length are compared to the manifest.
 Any mismatch raises; partial or "best effort" output is never returned.
 
+### 2.7 Manifests are treated as hostile input
+
+A manifest arrives from whatever storage served its CID. Anyone who can serve
+those bytes — a hostile gateway, a compromised pinning service, a network
+attacker on a plain-HTTP gateway — controls every field in it before a single
+cryptographic check runs.
+
+The interesting attacks there never reach the crypto at all:
+
+| Hostile field | Effect without validation | Defence |
+|---|---|---|
+| `totalChunks: 4e9` | restore loop hangs | bounded chunk count |
+| `fileSize: 1e15` | allocation kills the process | bounded size, consistency check |
+| `kdf.iterations: 1` | passphrase cracking becomes free | floor of 600,000 enforced |
+| `kdf.iterations: 1e12` | client hangs in PBKDF2 | ceiling enforced |
+| `__proto__` key | prototype pollution | rejected outright, not sanitised |
+| `location: "../../etc/passwd"` | path traversal / request forgery | strict alphanumeric pattern |
+| duplicate chunk indices | chunk table contradicts itself | indices must be exactly 0..n-1 |
+
+`js/core/validate.js` checks type, format and range on every field before it is
+used, and `js/core/limits.js` makes every bound explicit and overridable, rather
+than leaving it implied by whatever the machine happens to tolerate.
+
+### 2.8 The gateway never holds a key
+
+`server/` sits between users and the pinning provider so the pinning credential
+never reaches a browser — a browser cannot keep a secret, and any token shipped
+to the page is readable by every visitor.
+
+The important property is what the gateway is *not* trusted with: it never
+receives a passphrase, a file key or plaintext. Chunks arrive already sealed. A
+full compromise of that server exposes ciphertext, chunk sizes and traffic
+timing, not documents.
+
+Its own defences are conventional but deliberate: constant-time API key
+comparison (a naive `===` on a secret leaks it through timing, one character at
+a time), per-key token-bucket rate limiting, request bodies capped as bytes
+arrive rather than after buffering, strict CID validation before any upstream
+request, and a refusal to start when misconfigured rather than silently
+accepting anonymous uploads.
+
 ---
 
 ## 4. Threat model
@@ -212,6 +253,10 @@ Any mismatch raises; partial or "best effort" output is never returned.
 | One exporter revoking another's record | `revokeDocument` checks the registering address |
 | Chunk hash replayed as a subtree | Domain-separated Merkle tree |
 | Correlating two uploads of the same file in storage | Random per-file key |
+| Hostile manifest (resource bombs, weakened KDF, prototype pollution, path traversal) | Strict validation before use |
+| Pinning credential theft from the page | Credential lives in the gateway, never the browser |
+| One client exhausting the pinning quota | Per-key rate limiting |
+| API key recovery by timing | Constant-time comparison over hashed values |
 
 ### Not defended
 
@@ -237,6 +282,10 @@ an audit.
   on its own.
 - **Chunk sizes and counts leak metadata.** An observer sees roughly how large a
   file is and when it was registered. There is no padding.
+- **The gateway bounds rate, not total volume.** A client within its rate limit
+  can still pin indefinitely. Per-user quotas are not implemented.
+- **Gateway rate limits are per process and in memory.** Behind several
+  instances, each enforces its own share, and all buckets reset on restart.
 - **Not formally audited.** The composition is built from standard primitives
   and is tested, but it has not been reviewed by a professional cryptographer.
   Do not describe it as audited.

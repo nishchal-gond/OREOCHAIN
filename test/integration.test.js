@@ -17,6 +17,7 @@ import { putAll } from "../js/storage/ipfs.js";
 import { CHUNKED_VERIFICATION_ABI } from "../js/contract-abi.js";
 
 const require = createRequire(import.meta.url);
+const TEST_LIMITS = { minIterations: 1000 };
 
 function memoryIpfs() {
   const blocks = new Map();
@@ -66,9 +67,10 @@ async function retrieve(adapter, onChain, passphrase) {
     "manifest root must match the on-chain root"
   );
 
-  const opened = await openManifest(manifest, passphrase);
+  const opened = await openManifest(manifest, passphrase, { limits: TEST_LIMITS });
   return restoreFile(manifest, opened, (location) => adapter.get(location), {
     expectedMerkleRoot: onChain.merkleRoot,
+    limits: TEST_LIMITS,
   });
 }
 

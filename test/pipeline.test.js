@@ -15,6 +15,11 @@ import { splitIntoChunks } from "../js/core/chunker.js";
 const PASSPHRASE = "a-long-enough-test-passphrase";
 const FAST = 1000; // keep PBKDF2 cheap in tests
 
+// Manifests made with FAST would be rejected by the production floor of 600k
+// iterations, which is exactly what that check is for. Tests opt into a lower
+// floor explicitly rather than weakening the validator.
+const TEST_LIMITS = { minIterations: FAST };
+
 /** An in-memory stand-in for IPFS: content-addressed put/get. */
 function memoryStore() {
   const blocks = new Map();
@@ -57,9 +62,10 @@ test("a file survives chunking, encryption, storage and reassembly", async () =>
   const data = randomBytes(5000); // spans 5 chunks at 1 KiB
   const { store, manifest } = await roundTrip(data);
 
-  const opened = await openManifest(manifest, PASSPHRASE);
+  const opened = await openManifest(manifest, PASSPHRASE, { limits: TEST_LIMITS });
   const restored = await restoreFile(manifest, opened, (loc) => store.get(loc), {
     expectedMerkleRoot: manifest.merkleRoot,
+    limits: TEST_LIMITS,
   });
 
   assert.ok(equalBytes(restored.bytes, data));
@@ -73,8 +79,8 @@ test("binary content is preserved byte-for-byte", async () => {
   for (let i = 0; i < 256; i++) data[i] = i;
 
   const { store, manifest } = await roundTrip(data, { chunkSize: 64 });
-  const opened = await openManifest(manifest, PASSPHRASE);
-  const restored = await restoreFile(manifest, opened, (loc) => store.get(loc));
+  const opened = await openManifest(manifest, PASSPHRASE, { limits: TEST_LIMITS });
+  const restored = await restoreFile(manifest, opened, (loc) => store.get(loc), { limits: TEST_LIMITS });
 
   assert.ok(equalBytes(restored.bytes, data));
 });
@@ -82,8 +88,8 @@ test("binary content is preserved byte-for-byte", async () => {
 test("text content round-trips including non-ASCII", async () => {
   const text = "OREOCHAIN 🍪 — café, naïve, 日本語, ₹1000";
   const { store, manifest } = await roundTrip(utf8(text), { chunkSize: 16 });
-  const opened = await openManifest(manifest, PASSPHRASE);
-  const restored = await restoreFile(manifest, opened, (loc) => store.get(loc));
+  const opened = await openManifest(manifest, PASSPHRASE, { limits: TEST_LIMITS });
+  const restored = await restoreFile(manifest, opened, (loc) => store.get(loc), { limits: TEST_LIMITS });
   assert.equal(fromUtf8(restored.bytes), text);
 });
 
@@ -91,8 +97,8 @@ test("files at and around exact chunk boundaries round-trip", async () => {
   for (const size of [0, 1, 1023, 1024, 1025, 2048]) {
     const data = randomBytes(size);
     const { store, manifest } = await roundTrip(data);
-    const opened = await openManifest(manifest, PASSPHRASE);
-    const restored = await restoreFile(manifest, opened, (loc) => store.get(loc));
+    const opened = await openManifest(manifest, PASSPHRASE, { limits: TEST_LIMITS });
+    const restored = await restoreFile(manifest, opened, (loc) => store.get(loc), { limits: TEST_LIMITS });
     assert.ok(equalBytes(restored.bytes, data), `failed at ${size} bytes`);
   }
 });
@@ -124,17 +130,17 @@ test("the manifest hides the file name and chunk locations until unlocked", asyn
 
 test("the wrong passphrase cannot open the manifest", async () => {
   const { manifest } = await roundTrip(randomBytes(100));
-  await assert.rejects(() => openManifest(manifest, "not-the-passphrase"), /wrong passphrase/);
+  await assert.rejects(() => openManifest(manifest, "not-the-passphrase", { limits: TEST_LIMITS }), /wrong passphrase/);
 });
 
 test("an encrypted manifest refuses to open with no passphrase", async () => {
   const { manifest } = await roundTrip(randomBytes(100));
-  await assert.rejects(() => openManifest(manifest, null), /passphrase is required/);
+  await assert.rejects(() => openManifest(manifest, null, { limits: TEST_LIMITS }), /passphrase is required/);
 });
 
 test("a tampered stored chunk is caught before decryption", async () => {
   const { store, manifest } = await roundTrip(randomBytes(3000));
-  const opened = await openManifest(manifest, PASSPHRASE);
+  const opened = await openManifest(manifest, PASSPHRASE, { limits: TEST_LIMITS });
 
   const [firstId] = [...store.blocks.keys()];
   const corrupted = store.blocks.get(firstId).slice();
@@ -142,14 +148,14 @@ test("a tampered stored chunk is caught before decryption", async () => {
   store.blocks.set(firstId, corrupted);
 
   await assert.rejects(
-    () => restoreFile(manifest, opened, (loc) => store.get(loc)),
+    () => restoreFile(manifest, opened, (loc) => store.get(loc), { limits: TEST_LIMITS }),
     /does not match its recorded hash/
   );
 });
 
 test("swapping two stored chunks is detected", async () => {
   const { store, manifest } = await roundTrip(randomBytes(3000));
-  const opened = await openManifest(manifest, PASSPHRASE);
+  const opened = await openManifest(manifest, PASSPHRASE, { limits: TEST_LIMITS });
 
   const ids = [...store.blocks.keys()];
   const a = store.blocks.get(ids[0]);
@@ -157,31 +163,34 @@ test("swapping two stored chunks is detected", async () => {
   store.blocks.set(ids[0], b);
   store.blocks.set(ids[1], a);
 
-  await assert.rejects(() => restoreFile(manifest, opened, (loc) => store.get(loc)));
+  await assert.rejects(() => restoreFile(manifest, opened, (loc) => store.get(loc), { limits: TEST_LIMITS }));
 });
 
 test("a chunk replaced with one from another file is detected", async () => {
   const first = await roundTrip(randomBytes(3000));
   const second = await roundTrip(randomBytes(3000));
 
-  const opened = await openManifest(first.manifest, PASSPHRASE);
+  const opened = await openManifest(first.manifest, PASSPHRASE, { limits: TEST_LIMITS });
   const victimId = [...first.store.blocks.keys()][1];
   const intruder = [...second.store.blocks.values()][1];
   first.store.blocks.set(victimId, intruder);
 
   await assert.rejects(
-    () => restoreFile(first.manifest, opened, (loc) => first.store.get(loc))
+    () => restoreFile(first.manifest, opened, (loc) => first.store.get(loc), {
+        limits: TEST_LIMITS,
+      })
   );
 });
 
 test("a manifest claiming a different on-chain root is rejected", async () => {
   const { store, manifest } = await roundTrip(randomBytes(2000));
-  const opened = await openManifest(manifest, PASSPHRASE);
+  const opened = await openManifest(manifest, PASSPHRASE, { limits: TEST_LIMITS });
 
   await assert.rejects(
     () =>
       restoreFile(manifest, opened, (loc) => store.get(loc), {
         expectedMerkleRoot: "0x" + "11".repeat(32),
+        limits: TEST_LIMITS,
       }),
     /does not match the root recorded on-chain/
   );
@@ -189,11 +198,11 @@ test("a manifest claiming a different on-chain root is rejected", async () => {
 
 test("a manifest with a missing chunk entry is rejected", async () => {
   const { store, manifest } = await roundTrip(randomBytes(3000));
-  const opened = await openManifest(manifest, PASSPHRASE);
+  const opened = await openManifest(manifest, PASSPHRASE, { limits: TEST_LIMITS });
   opened.body.chunks.splice(1, 1);
 
   await assert.rejects(
-    () => restoreFile(manifest, opened, (loc) => store.get(loc)),
+    () => restoreFile(manifest, opened, (loc) => store.get(loc), { limits: TEST_LIMITS }),
     /declares|gap at index/
   );
 });
@@ -221,9 +230,10 @@ test("public (unencrypted) mode still chunks and verifies", async () => {
   assert.equal(manifest.encrypted, false);
   assert.equal(typeof manifest.body, "object");
 
-  const opened = await openManifest(manifest, null);
+  const opened = await openManifest(manifest, null, { limits: TEST_LIMITS });
   const restored = await restoreFile(manifest, opened, (loc) => store.get(loc), {
     expectedMerkleRoot: manifest.merkleRoot,
+    limits: TEST_LIMITS,
   });
   assert.ok(equalBytes(restored.bytes, data));
 });

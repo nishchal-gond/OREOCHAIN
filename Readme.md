@@ -84,6 +84,36 @@ security decision rather than a lack of ambition.
 
 ---
 
+## The gateway
+
+`server/` is a zero-dependency Node service that sits between your users and
+your pinning provider.
+
+```
+browser (encrypts)  ──►  gateway (authenticates, meters)  ──►  IPFS / Pinata
+       │                        │
+       │                        └── holds the pinning credential
+       └── holds the passphrase and the file key
+```
+
+A browser cannot keep a secret: any pinning credential shipped to the page is
+readable by every visitor. The gateway moves that credential server-side and
+adds what only a server can enforce — API key authentication, per-key rate
+limiting, request size caps, and one audit point where every upload is logged.
+
+**It never sees plaintext.** Chunks arrive already encrypted and no passphrase
+or file key is ever sent to it, so a full compromise exposes ciphertext and
+traffic patterns rather than documents.
+
+```bash
+OREOCHAIN_STORAGE=memory OREOCHAIN_ALLOW_ANONYMOUS=true npm run dev
+```
+
+See [`server/README.md`](server/README.md) for configuration, the API, and an
+honest list of what it does not do yet.
+
+---
+
 ## Tech stack
 
 - **Chain:** any EVM network (Polygon by default)
@@ -106,17 +136,27 @@ js/core/chunker.js                 chunking + Merkle tree
 js/core/crypto.js                  envelope encryption, key derivation
 js/core/suites.js                  cipher suite registry
 js/core/manifest.js                the pipeline: pack, seal, open, restore
-js/storage/ipfs.js                 storage adapters (gateway / Pinata)
+js/core/validate.js                strict validation of untrusted manifests
+js/core/limits.js                  resource limits, all caller-overridable
+js/storage/ipfs.js                 storage adapters, retry/backoff, resume
 js/chunked-app.js                  browser controller for upload + retrieval
 js/App.js                          wallet session, chain helpers, admin
 js/contract-abi.js                 generated — see `npm run abi`
 
-test/                              81 tests, including EVM cross-checks
+server/gateway.mjs                 HTTP handler: auth, limits, routing
+server/config.mjs                  environment config, validated at startup
+server/auth.mjs                    constant-time API key checks
+server/ratelimit.mjs               per-key token bucket
+server/storage.mjs                 server-side pinning; holds the credential
+
+test/                              159 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 ```
 
 `js/core/` and `js/storage/` have no DOM or network dependencies, so the same
-modules run unchanged in a Node server or a CLI.
+modules run unchanged in the browser, in the gateway, or in a CLI. That is
+deliberate: there is exactly one implementation of the chunking and crypto, so
+the client and the server can never disagree about what a valid file is.
 
 ---
 
@@ -187,15 +227,48 @@ chunks already pinned off-chain.
 
 ---
 
+## Robustness
+
+Chunking multiplies every per-request failure by the number of chunks, so the
+network layer assumes failure is normal:
+
+- **Retry with exponential backoff and full jitter** on transient failures
+  (408, 429, 5xx, connection errors). Permanent failures (400, 401, 403, 404)
+  are not retried. Without jitter, chunks that failed together retry together
+  and reproduce the burst that caused the failure.
+- **Gateway failover** — each read gateway is retried, then the next is tried.
+- **Resumable uploads** — pass the locations array from an interrupted run as
+  `resumeFrom` and only the missing chunks upload again.
+- **Cancellation** — every network path accepts an `AbortSignal`.
+- **Streaming retrieval** — `restoreFileStream()` yields verified chunks in
+  order with bounded look-ahead, so a server can pipe a 4 GB file to a response
+  without buffering it. Verification is identical to the buffered path.
+- **Explicit limits** — chunk counts, file sizes, iteration counts and manifest
+  sizes are all bounded, and every bound is caller-overridable rather than
+  implied by whatever the machine happens to tolerate.
+
+Manifests are treated as hostile input, because anyone who can serve bytes for
+a CID controls every field before a single cryptographic check runs.
+`js/core/validate.js` rejects prototype-polluting keys, chunk counts that would
+hang the restore loop, file sizes that would invite an enormous allocation,
+manifests that weaken their own KDF parameters, chunk tables that disagree with
+their header, and storage locations that could traverse a path or switch
+protocol.
+
+---
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-81 tests covering chunk round-trips at every boundary size, Merkle proofs across
-every tree shape, tamper/reorder/splice/truncation detection, wrong-passphrase
-handling, all three cipher suites, and storage adapter failover.
+159 tests covering chunk round-trips at every boundary size, Merkle proofs
+across every tree shape, tamper/reorder/splice/truncation detection,
+wrong-passphrase handling, all three cipher suites, retry and resume behaviour,
+hostile manifests, streaming and cancellation, and the gateway's auth, rate
+limiting, body caps and traversal defences — the last against a real HTTP
+server on an ephemeral port.
 
 `test/contract.test.js` compiles the contract and executes it in a real EVM to
 confirm the Solidity Merkle implementation matches the JavaScript one
