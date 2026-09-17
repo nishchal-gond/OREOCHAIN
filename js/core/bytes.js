@@ -77,15 +77,32 @@ export function equalBytes(a, b) {
   return diff === 0;
 }
 
-/** The WebCrypto implementation, in a browser or in Node. */
+/**
+ * The WebCrypto implementation, in a browser or in Node.
+ *
+ * Node only exposed Web Crypto as `globalThis.crypto` from v19. On v18 the same
+ * implementation exists but has to be taken off `node:crypto`, so resolve it
+ * once here rather than failing at the first hash. The dynamic import is
+ * reached only when a Node runtime is detected, so a browser never evaluates it.
+ */
+let cryptoImpl = globalThis.crypto;
+
+if (
+  (!cryptoImpl || !cryptoImpl.subtle) &&
+  typeof process !== "undefined" &&
+  process.versions &&
+  process.versions.node
+) {
+  cryptoImpl = (await import("node:crypto")).webcrypto;
+}
+
 export function webcrypto() {
-  const c = globalThis.crypto;
-  if (!c || !c.subtle) {
+  if (!cryptoImpl || !cryptoImpl.subtle) {
     throw new Error(
-      "WebCrypto is unavailable. Use a modern browser over HTTPS (or localhost), or Node 18+."
+      "WebCrypto is unavailable. Use a browser on a secure origin (HTTPS or localhost), or Node 18 or newer."
     );
   }
-  return c;
+  return cryptoImpl;
 }
 
 export function randomBytes(length) {

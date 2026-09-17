@@ -1,10 +1,11 @@
 name: CI
 
 on:
+  # Only the default branch runs on push. Pull request branches are covered by
+  # the pull_request trigger, and listening to both ran every PR commit twice.
   push:
-    branches: ["**"]
+    branches: [master, main]
   pull_request:
-    branches: ["**"]
 
 # A new push supersedes an in-flight run on the same ref.
 concurrency:
@@ -22,8 +23,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 18 is the floor declared in package.json; 22 is what development uses.
-        node: ["18", "20", "22"]
+        # 18 is the floor declared in package.json. It is past end-of-life, so
+        # it is tested rather than recommended: Node exposes Web Crypto as a
+        # global only from v19, and this matrix is what caught the core failing
+        # wholesale on v18.
+        node: ["18", "20", "22", "24"]
 
     steps:
       - uses: actions/checkout@v4

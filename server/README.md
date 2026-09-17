@@ -148,24 +148,27 @@ removes cross-origin requests entirely, which is the simplest deployment.
 
 ## Deployment notes
 
-1. **Put TLS in front of it.** The gateway speaks plain HTTP by design; end it
+1. **Run a supported Node.** The code works on Node 18, but 18 is past
+   end-of-life and receives no security patches — use 20 or newer for anything
+   deployed.
+2. **Put TLS in front of it.** The gateway speaks plain HTTP by design; end it
    at a reverse proxy or load balancer. WebCrypto in the browser requires a
    secure origin anyway.
-2. **Bind to loopback** and let the proxy handle the internet.
-3. **One API key per client**, so a leaked key can be revoked without disrupting
+3. **Bind to loopback** and let the proxy handle the internet.
+4. **One API key per client**, so a leaked key can be revoked without disrupting
    everyone. Revoking means removing it from `OREOCHAIN_API_KEYS` and restarting.
-4. **Ship the logs somewhere.** Each line is JSON with an event, a key digest
+5. **Ship the logs somewhere.** Each line is JSON with an event, a key digest
    (never the key), byte counts and CIDs.
-5. **Set `OREOCHAIN_RECEIPT_KEY` before going live.** Without it the gateway
+6. **Set `OREOCHAIN_RECEIPT_KEY` before going live.** Without it the gateway
    signs receipts with a throwaway key and warns at startup — every restart
    then invalidates every receipt previously issued, because nobody can verify
    them any more. Anchored batches are unaffected; they live on-chain.
-6. Rate limits are per process and in memory. Behind multiple instances each
+7. Rate limits are per process and in memory. Behind multiple instances each
    enforces its own share; move to a shared store if you need a global limit.
    Authenticated callers are bucketed by key, anonymous ones by source address
    — which behind a reverse proxy is the proxy's address, so every anonymous
    caller shares one bucket unless the proxy enforces its own limits.
-7. `SIGTERM` drains in-flight requests before exiting, so a deploy does not
+8. `SIGTERM` drains in-flight requests before exiting, so a deploy does not
    drop an upload mid-chunk.
 
 ## What is not here yet

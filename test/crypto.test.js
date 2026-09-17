@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 import { equalBytes, randomBytes, toHex, utf8 } from "../js/core/bytes.js";
 import {
@@ -198,4 +201,48 @@ test("the additional authenticated data pins file, index and count", () => {
   assert.match(aad, /\|12$/);
   assert.notEqual(toHex(chunkAad("0xfeed", 5, 12)), toHex(chunkAad("0xfeed", 6, 12)));
   assert.ok(utf8("sanity").length === 6);
+});
+
+test("the crypto core works without globalThis.crypto", () => {
+  /*
+   * Node exposed Web Crypto as a global only from v19. On v18 the same
+   * implementation exists but must be taken off node:crypto, and every
+   * cryptographic operation in this project failed there — 129 tests at once —
+   * until bytes.js learned to fall back.
+   *
+   * A child process with the global deleted reproduces that runtime exactly,
+   * which is the only way to cover it from a newer Node.
+   */
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const script = `
+    delete globalThis.crypto;
+    const { sha256 } = await import(${JSON.stringify(`${root}/js/core/chunker.js`)});
+    const { toHex } = await import(${JSON.stringify(`${root}/js/core/bytes.js`)});
+    const {
+      generateFileKey, generateSalt, chunkAad, encryptChunk, decryptChunk,
+    } = await import(${JSON.stringify(`${root}/js/core/crypto.js`)});
+
+    const digest = toHex(await sha256(new Uint8Array([1, 2, 3])));
+
+    const key = generateFileKey();
+    const salt = generateSalt();
+    const aad = chunkAad("0xab", 0, 1);
+    const sealed = await encryptChunk(new Uint8Array([9, 9, 9]), key, salt, 0, aad);
+    const opened = await decryptChunk(sealed, key, salt, 0, aad);
+
+    console.log(JSON.stringify({ digest, opened: Array.from(opened) }));
+  `;
+
+  const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const result = JSON.parse(output.trim().split("\n").pop());
+  // SHA-256 of the bytes 01 02 03.
+  assert.equal(
+    result.digest,
+    "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
+  );
+  assert.deepEqual(result.opened, [9, 9, 9]);
 });
