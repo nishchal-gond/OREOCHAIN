@@ -11,7 +11,7 @@
 
 import { to0x, utf8 } from "./core/bytes.js";
 import { DEFAULT_CHUNK_SIZE } from "./core/chunker.js";
-import { DEFAULT_PBKDF2_ITERATIONS } from "./core/crypto.js";
+import { DEFAULT_KDF, describeKdf, kdfSpec } from "./core/kdf.js";
 import {
   openManifest,
   packFile,
@@ -29,7 +29,7 @@ const DEFAULTS = {
   crypto: {
     suite: DEFAULT_SUITE,
     chunkSize: DEFAULT_CHUNK_SIZE,
-    iterations: DEFAULT_PBKDF2_ITERATIONS,
+    kdf: DEFAULT_KDF,
   },
 };
 
@@ -76,6 +76,17 @@ function busy(isBusy) {
     const button = el(id);
     if (button) button.disabled = isBusy;
   }
+}
+
+/**
+ * Hand the event loop one turn so pending DOM updates paint.
+ *
+ * Argon2id is memory-hard by design and blocks this thread for roughly a
+ * second at production settings; without this the "deriving" message would
+ * only appear after the work it describes had already finished.
+ */
+function yieldToBrowser() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function humanSize(bytes) {
@@ -166,11 +177,17 @@ export async function uploadChunked() {
     const account = currentAccount();
     const contract = contractInstance();
 
-    say(
-      passphrase
-        ? `Chunking and encrypting ${humanSize(bytes.length)} with ${suite}…`
-        : `Chunking ${humanSize(bytes.length)} (unencrypted — no passphrase given)…`
-    );
+    if (passphrase) {
+      say(
+        `Deriving your key with ${describeKdf(cryptoConfig.kdf)}, then encrypting ` +
+          `${humanSize(bytes.length)} with ${suite}…`
+      );
+      // Argon2id is deliberately slow and runs on this thread, so yield once to
+      // let the message above actually render before the tab stops responding.
+      await yieldToBrowser();
+    } else {
+      say(`Chunking ${humanSize(bytes.length)} (unencrypted — no passphrase given)…`);
+    }
 
     const packed = await packFile(bytes, {
       fileName: file.name,
@@ -178,7 +195,7 @@ export async function uploadChunked() {
       passphrase,
       suite,
       chunkSize: cryptoConfig.chunkSize,
-      iterations: cryptoConfig.iterations,
+      kdf: cryptoConfig.kdf,
       onProgress: (done, total) => showProgress(done, total, "sealed"),
     });
 
@@ -346,7 +363,10 @@ export async function retrieveChunked() {
       throw new Error("This document is encrypted. Enter its passphrase.");
     }
 
-    say("Unlocking manifest…");
+    if (manifest.encrypted) {
+      say(`Deriving your key with ${describeKdf(manifest.kdf)}…`);
+      await yieldToBrowser();
+    }
     const opened = await openManifest(manifest, passphrase);
 
     say(`Fetching and verifying ${manifest.totalChunks} chunks…`);

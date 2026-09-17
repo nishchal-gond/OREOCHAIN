@@ -22,6 +22,7 @@
  */
 
 import { MANIFEST_LIMITS } from "./limits.js";
+import { assertArgon2Shape, KDF_ARGON2ID, KDF_PBKDF2, normalizeKdfName } from "./kdf.js";
 
 const HEX32 = /^0x[0-9a-f]{64}$/;
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
@@ -160,11 +161,8 @@ export function validateManifestHeader(manifest, limits = {}) {
       fail("kdf parameters are missing");
     }
     requireString(manifest.kdf.name, "kdf.name", { max: 64 });
-    requireInteger(manifest.kdf.iterations, "kdf.iterations", {
-      min: bounds.minIterations,
-      max: bounds.maxIterations,
-    });
     requireString(manifest.kdf.salt, "kdf.salt", { max: 128, pattern: BASE64 });
+    validateKdfParameters(manifest.kdf, bounds);
     requireString(manifest.fileSalt, "fileSalt", { max: 128, pattern: BASE64 });
 
     if (manifest.wrappedKey === null || typeof manifest.wrappedKey !== "object") {
@@ -256,6 +254,57 @@ export function validateManifestBody(body, manifest, limits = {}) {
   }
 
   return body;
+}
+
+/**
+ * Check the KDF parameters a manifest asks a reader to reproduce.
+ *
+ * Both directions are attacks. Parameters below the floor make cracking the
+ * passphrase cheap for whoever serves the manifest — the whole reason for
+ * moving to Argon2id. Parameters above the ceiling turn opening a file into a
+ * denial of service against the reader, who would otherwise dutifully allocate
+ * the gigabytes the manifest demanded.
+ */
+export function validateKdfParameters(kdf, limits = {}) {
+  const bounds = { ...MANIFEST_LIMITS, ...limits };
+
+  let name;
+  try {
+    name = normalizeKdfName(kdf.name);
+  } catch (error) {
+    fail(error.message);
+  }
+
+  if (name === KDF_ARGON2ID) {
+    requireInteger(kdf.memoryKiB, "kdf.memoryKiB", {
+      min: bounds.minArgon2MemoryKiB,
+      max: bounds.maxArgon2MemoryKiB,
+    });
+    requireInteger(kdf.iterations, "kdf.iterations", {
+      min: bounds.minArgon2Iterations,
+      max: bounds.maxArgon2Iterations,
+    });
+    requireInteger(kdf.parallelism, "kdf.parallelism", {
+      min: bounds.minArgon2Parallelism,
+      max: bounds.maxArgon2Parallelism,
+    });
+    try {
+      assertArgon2Shape(kdf);
+    } catch (error) {
+      fail(error.message);
+    }
+    return name;
+  }
+
+  if (name === KDF_PBKDF2) {
+    requireInteger(kdf.iterations, "kdf.iterations", {
+      min: bounds.minIterations,
+      max: bounds.maxIterations,
+    });
+    return name;
+  }
+
+  return fail(`unsupported kdf ${kdf.name}`);
 }
 
 /** Reject a file the caller is not prepared to hold in memory. */

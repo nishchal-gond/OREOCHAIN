@@ -19,6 +19,11 @@ import {
   wrapFileKey,
 } from "../js/core/crypto.js";
 
+// Argon2id at production settings costs ~0.7s per derivation, which would make
+// this suite take minutes. Tests declare cheap parameters explicitly, and a
+// matching floor, rather than silently inheriting defaults.
+const TEST_KDF = { name: "argon2id", memoryKiB: 8, iterations: 1, parallelism: 1 };
+
 // Tests use a low iteration count for speed; production uses the default.
 const FAST = 1000;
 const AAD = chunkAad("0xdeadbeef", 0, 1);
@@ -164,8 +169,8 @@ test("the file key round-trips through passphrase wrapping", async () => {
   const fileKey = generateFileKey();
   const kdfSalt = generateSalt();
 
-  const wrapped = await wrapFileKey(fileKey, "correct horse battery staple", kdfSalt, FAST);
-  const unwrapped = await unwrapFileKey(wrapped, "correct horse battery staple", kdfSalt, FAST);
+  const wrapped = await wrapFileKey(fileKey, "correct horse battery staple", kdfSalt, TEST_KDF);
+  const unwrapped = await unwrapFileKey(wrapped, "correct horse battery staple", kdfSalt, TEST_KDF);
 
   assert.ok(equalBytes(unwrapped, fileKey));
 });
@@ -173,23 +178,23 @@ test("the file key round-trips through passphrase wrapping", async () => {
 test("a wrong passphrase fails cleanly instead of returning garbage", async () => {
   const fileKey = generateFileKey();
   const kdfSalt = generateSalt();
-  const wrapped = await wrapFileKey(fileKey, "right", kdfSalt, FAST);
+  const wrapped = await wrapFileKey(fileKey, "right", kdfSalt, TEST_KDF);
 
   await assert.rejects(
-    () => unwrapFileKey(wrapped, "wrong", kdfSalt, FAST),
+    () => unwrapFileKey(wrapped, "wrong", kdfSalt, TEST_KDF),
     /wrong passphrase/
   );
 });
 
 test("the same passphrase with a different salt yields a different key", async () => {
-  const a = await deriveKeyEncryptionKey("same passphrase", generateSalt(), FAST);
-  const b = await deriveKeyEncryptionKey("same passphrase", generateSalt(), FAST);
+  const a = await deriveKeyEncryptionKey("same passphrase", generateSalt(), TEST_KDF);
+  const b = await deriveKeyEncryptionKey("same passphrase", generateSalt(), TEST_KDF);
   assert.notEqual(toHex(a), toHex(b));
 });
 
 test("an empty passphrase is refused rather than silently accepted", async () => {
   await assert.rejects(
-    () => deriveKeyEncryptionKey("", generateSalt(), FAST),
+    () => deriveKeyEncryptionKey("", generateSalt(), TEST_KDF),
     /passphrase is required/
   );
 });

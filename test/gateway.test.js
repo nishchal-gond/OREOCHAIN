@@ -21,8 +21,13 @@ import { importPublicKey, verifyReceipt } from "../js/core/receipt.js";
 import { verifyInBatch } from "../js/core/anchor.js";
 import { openManifest, packFile, restoreFile, sealManifest } from "../js/core/manifest.js";
 
+// Argon2id at production settings costs ~0.7s per derivation, which would make
+// this suite take minutes. Tests declare cheap parameters explicitly, and a
+// matching floor, rather than silently inheriting defaults.
+const TEST_KDF = { name: "argon2id", memoryKiB: 8, iterations: 1, parallelism: 1 };
+
 const KEY = "k".repeat(48);
-const TEST_LIMITS = { minIterations: 1000 };
+const TEST_LIMITS = { minArgon2MemoryKiB: 8 };
 
 function baseEnv(overrides = {}) {
   return {
@@ -458,7 +463,7 @@ test("a whole document round-trips through the gateway, client-side encrypted", 
         mimeType: "application/pdf",
         passphrase,
         chunkSize: 1024,
-        iterations: 1000,
+        kdf: TEST_KDF,
       });
 
       const locations = await putAll(adapter, packed.chunks, { concurrency: 4 });

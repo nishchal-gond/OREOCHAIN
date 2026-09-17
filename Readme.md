@@ -96,9 +96,17 @@ chunk — the classic second-preimage attack on naive Merkle trees.
 Envelope encryption, with one key per chunk:
 
 ```
-passphrase ──PBKDF2──► KEK ──wraps──► file key ──HKDF──► key₀, key₁, key₂ …
-                                                         nonce₀, nonce₁ …
+passphrase ──Argon2id──► KEK ──wraps──► file key ──HKDF──► key₀, key₁, key₂ …
+   (memory-hard)                                            nonce₀, nonce₁ …
 ```
+
+The passphrase step is memory-hard on purpose. The wrapped file key travels in
+the manifest, so anyone who fetches one can guess passphrases offline at
+hardware speed — the cost of a single guess is the whole defence, and it is the
+parameter an attacker cannot buy their way around. Argon2id forces every guess
+to allocate and traverse 46 MB, which is exactly what a GPU or ASIC cannot
+cheaply multiply. PBKDF2, which needs almost no memory, remains readable so
+files sealed before this change still open.
 
 Two properties follow that a single-key design cannot offer:
 
@@ -258,6 +266,7 @@ js/core/crypto.js                  envelope encryption, key derivation
 js/core/suites.js                  cipher suite registry
 js/core/manifest.js                the pipeline: pack, seal, open, restore, stream
 js/core/anchor.js                  batch trees and inclusion proofs
+js/core/kdf.js                     Argon2id passphrase stretching (+ legacy PBKDF2)
 js/core/receipt.js                 signed receipts
 js/core/validate.js                strict validation of untrusted manifests
 js/core/limits.js                  resource limits, all caller-overridable
@@ -269,7 +278,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              201 tests, including EVM cross-checks
+test/                              226 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 ```
 
@@ -304,7 +313,7 @@ every field in one before a single cryptographic check runs:
 |---|---|---|
 | `totalChunks: 4e9` | restore loop hangs | bounded chunk count |
 | `fileSize: 1e15` | allocation kills the process | bounded size + consistency check |
-| `kdf.iterations: 1` | passphrase cracking becomes free | floor of 600,000 enforced |
+| `kdf.memoryKiB: 8` | passphrase cracking becomes cheap again | floor of 19,456 KiB enforced |
 | `__proto__` | prototype pollution | rejected outright, not sanitised |
 | `location: "../../etc/passwd"` | traversal / request forgery | strict pattern |
 
@@ -313,11 +322,12 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test     # 201 tests
+npm test     # 226 tests
 npm run abi  # regenerate js/contract-abi.js after changing the contract
 ```
 
-Coverage includes chunk round-trips at every boundary size, Merkle proofs across
+Coverage includes the RFC 9106 known-answer vector for Argon2id, chunk
+round-trips at every boundary size, Merkle proofs across
 every tree shape, tamper/reorder/splice/truncation detection, all three cipher
 suites, retry and resume behaviour, hostile manifests, streaming and
 cancellation, batch anchoring and receipt forgery, and the gateway's auth, rate
@@ -363,9 +373,9 @@ undocumented is a security system nobody can evaluate.
 
 In priority order, with reasoning rather than dates:
 
-1. **Argon2id for passphrase stretching.** PBKDF2 is memory-cheap and therefore
-   weak against GPU attackers. This is the single highest-value change, because
-   human-chosen passphrases are the real weakest link — not the cipher.
+1. **Move key derivation to a Web Worker.** Argon2id is pure JavaScript here and
+   blocks the UI thread for about a second. A worker would keep the tab
+   responsive and make stronger parameters affordable.
 2. **Automated batch submission**, so anchoring needs no operator action.
 3. **Multi-recipient key wrapping** — share a document without sharing a
    passphrase.

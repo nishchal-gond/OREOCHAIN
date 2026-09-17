@@ -1,0 +1,167 @@
+/**
+ * Passphrase key-derivation functions.
+ *
+ * WHY THIS IS THE MOST IMPORTANT FILE IN THE PROJECT
+ *
+ * Every other defence here assumes the attacker does not have the file key.
+ * The file key is wrapped by a key derived from a human-chosen passphrase, and
+ * the wrapped key is public — it travels in the manifest. So an attacker who
+ * fetches a manifest can guess passphrases offline, as fast as their hardware
+ * allows, with no rate limit and nobody watching.
+ *
+ * That makes the cost of a single guess the real security parameter. Not the
+ * cipher. AES-256 is irrelevant if "summer2024" takes a millisecond to test.
+ *
+ * PBKDF2 raises that cost by iterating, but it needs almost no memory, so a GPU
+ * runs thousands of guesses in parallel and an ASIC does far better. Argon2id is
+ * *memory-hard*: each guess must allocate and randomly traverse tens of
+ * megabytes, which is exactly the resource parallel hardware cannot cheaply
+ * multiply. The same attacker budget buys orders of magnitude fewer guesses.
+ *
+ * Argon2id specifically — rather than Argon2i or Argon2d — is the hybrid RFC
+ * 9106 recommends by default: Argon2d's data-dependent addressing resists
+ * time-memory trade-offs but leaks through cache side channels, Argon2i is the
+ * reverse, and Argon2id takes one pass of each.
+ *
+ * PBKDF2 remains implemented, because files sealed before this existed must
+ * still open. It is readable, never written for new files.
+ */
+
+import { argon2id } from "../../node_modules/@noble/hashes/esm/argon2.js";
+import { utf8, webcrypto } from "./bytes.js";
+
+export const KDF_ARGON2ID = "argon2id";
+export const KDF_PBKDF2 = "pbkdf2-sha256";
+
+/** New files use Argon2id. PBKDF2 is read-only legacy. */
+export const DEFAULT_KDF = KDF_ARGON2ID;
+
+const KEY_BYTES = 32;
+
+/**
+ * OWASP's recommended Argon2id profile with the largest memory of the
+ * practical options: m=46 MiB, t=1, p=1.
+ *
+ * Memory is the parameter that hurts a parallel attacker, so it is preferred
+ * over passes when a budget has to be spent on one of them. This costs roughly
+ * 0.7s in pure JavaScript on a desktop — the ceiling worth paying when the
+ * derivation blocks the UI thread. Raise it for server-side use.
+ */
+export const ARGON2ID_DEFAULTS = Object.freeze({
+  memoryKiB: 47104,
+  iterations: 1,
+  parallelism: 1,
+});
+
+/** OWASP's floor for PBKDF2-HMAC-SHA256. Legacy files only. */
+export const PBKDF2_DEFAULTS = Object.freeze({ iterations: 600000 });
+
+/**
+ * Manifests written before Argon2id existed spell the name "PBKDF2-SHA256".
+ * Normalising here keeps every reader on one spelling.
+ */
+export function normalizeKdfName(name) {
+  const lower = String(name || "").toLowerCase();
+  if (lower === KDF_ARGON2ID || lower === "argon2") return KDF_ARGON2ID;
+  if (lower === KDF_PBKDF2 || lower === "pbkdf2" || lower === "pbkdf2-hmac-sha256") {
+    return KDF_PBKDF2;
+  }
+  throw new Error(`unsupported key-derivation function: ${name}`);
+}
+
+/** Build a parameter set, filling in defaults for anything unspecified. */
+export function kdfSpec(input = DEFAULT_KDF) {
+  // Reject anything that is not a name or a parameter set. An earlier version
+  // of this API took a bare PBKDF2 iteration count positionally; spreading a
+  // number yields {} and would silently hand back defaults, turning an
+  // upgrade into a quiet change of security parameters.
+  if (typeof input === "number" || typeof input === "boolean" || input === null) {
+    throw new Error(
+      `kdf must be a name or a parameter object, received ${typeof input} — ` +
+        'e.g. "argon2id" or { name: "argon2id", memoryKiB: 47104 }'
+    );
+  }
+  const raw = typeof input === "string" ? { name: input } : { ...input };
+  const name = normalizeKdfName(raw.name || DEFAULT_KDF);
+
+  if (name === KDF_ARGON2ID) {
+    const spec = {
+      name,
+      memoryKiB: raw.memoryKiB ?? ARGON2ID_DEFAULTS.memoryKiB,
+      iterations: raw.iterations ?? ARGON2ID_DEFAULTS.iterations,
+      parallelism: raw.parallelism ?? ARGON2ID_DEFAULTS.parallelism,
+    };
+    assertArgon2Shape(spec);
+    return spec;
+  }
+  return { name, iterations: raw.iterations ?? PBKDF2_DEFAULTS.iterations };
+}
+
+/**
+ * Argon2 requires at least 8 KiB of memory per lane. Checking it here turns a
+ * cryptic failure from deep inside the hash into a clear one at the point the
+ * parameters were chosen.
+ */
+export function assertArgon2Shape(spec) {
+  if (spec.memoryKiB < 8 * spec.parallelism) {
+    throw new Error(
+      `Argon2id needs memoryKiB >= 8 * parallelism (got ${spec.memoryKiB} with p=${spec.parallelism})`
+    );
+  }
+  return spec;
+}
+
+/** A short description for a UI or a log line. */
+export function describeKdf(spec) {
+  const normalized = kdfSpec(spec);
+  return normalized.name === KDF_ARGON2ID
+    ? `Argon2id (${normalized.memoryKiB} KiB, ${normalized.iterations} pass${
+        normalized.iterations === 1 ? "" : "es"
+      }, p=${normalized.parallelism})`
+    : `PBKDF2-SHA256 (${normalized.iterations} iterations)`;
+}
+
+async function derivePbkdf2(passphrase, salt, iterations) {
+  const subtle = webcrypto().subtle;
+  const material = await subtle.importKey("raw", utf8(passphrase), "PBKDF2", false, [
+    "deriveBits",
+  ]);
+  const bits = await subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    material,
+    KEY_BYTES * 8
+  );
+  return new Uint8Array(bits);
+}
+
+function deriveArgon2id(passphrase, salt, spec) {
+  return argon2id(utf8(passphrase), salt, {
+    t: spec.iterations,
+    m: spec.memoryKiB,
+    p: spec.parallelism,
+    dkLen: KEY_BYTES,
+  });
+}
+
+/**
+ * Stretch a passphrase into a 256-bit key-encryption key.
+ *
+ * @param {string} passphrase
+ * @param {Uint8Array} salt unique per file, so one cracking effort buys one file
+ * @param {object|string} spec see kdfSpec()
+ */
+export async function deriveKeyEncryptionKey(passphrase, salt, spec = DEFAULT_KDF) {
+  if (typeof passphrase !== "string" || passphrase.length === 0) {
+    throw new Error("a passphrase is required");
+  }
+  if (!(salt instanceof Uint8Array) || salt.length < 8) {
+    throw new Error("a salt of at least 8 bytes is required");
+  }
+
+  const normalized = kdfSpec(spec);
+  return normalized.name === KDF_ARGON2ID
+    ? deriveArgon2id(passphrase, salt, normalized)
+    : derivePbkdf2(passphrase, salt, normalized.iterations);
+}
+
+export const _internals = { deriveArgon2id, derivePbkdf2, KEY_BYTES };
