@@ -64,7 +64,12 @@ function securityHeaders(res) {
     "Content-Security-Policy",
     "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; " +
       "connect-src 'self' https:; style-src 'self' 'unsafe-inline' https:; " +
-      "script-src 'self' https:; font-src 'self' https: data:; object-src 'none'; " +
+      // worker-src is required for key derivation. Browsers that honour it do
+      // not fall back to script-src, so omitting it blocks the worker and
+      // silently forces every derivation back onto the main thread — the exact
+      // freeze the worker exists to prevent.
+      "script-src 'self' https:; worker-src 'self' blob:; " +
+      "font-src 'self' https: data:; object-src 'none'; " +
       "base-uri 'none'; frame-ancestors 'none'"
   );
 }

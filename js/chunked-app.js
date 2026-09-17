@@ -81,9 +81,11 @@ function busy(isBusy) {
 /**
  * Hand the event loop one turn so pending DOM updates paint.
  *
- * Argon2id is memory-hard by design and blocks this thread for roughly a
- * second at production settings; without this the "deriving" message would
- * only appear after the work it describes had already finished.
+ * Key derivation runs in a worker (js/core/kdf-worker.js), so the page stays
+ * responsive. This remains for the fallback path — a browser without workers,
+ * or a deployment where the worker script fails to load — where Argon2id runs
+ * here and would otherwise freeze the tab before its own progress message had
+ * a chance to render.
  */
 function yieldToBrowser() {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -182,8 +184,9 @@ export async function uploadChunked() {
         `Deriving your key with ${describeKdf(cryptoConfig.kdf)}, then encrypting ` +
           `${humanSize(bytes.length)} with ${suite}…`
       );
-      // Argon2id is deliberately slow and runs on this thread, so yield once to
-      // let the message above actually render before the tab stops responding.
+      // Derivation normally runs in a worker and leaves this thread free. The
+      // yield only matters on the fallback path, where it lets the message
+      // above paint before Argon2id takes the thread.
       await yieldToBrowser();
     } else {
       say(`Chunking ${humanSize(bytes.length)} (unencrypted — no passphrase given)…`);
