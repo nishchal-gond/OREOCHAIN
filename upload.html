@@ -5,9 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="./css/loader.css" />
     <link href="./css/bootstrap.min.css" rel="stylesheet" />
-    <script src="node_modules\web3\dist\web3.min.js"></script>
-    <script src="js/App.js"></script>
+    <script src="./node_modules/web3/dist/web3.min.js"></script>
     <script src="js/qrcode.min.js"></script>
+    <script src="./js/config.js"></script>
+    <script type="module" src="js/App.js"></script>
+    <script type="module" src="./js/chunked-app.js"></script>
     
     <link
       rel="stylesheet"
@@ -62,6 +64,9 @@
             </li>
             <li class="nav-item">
               <a class="nav-link active" href="upload.html">Upload</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="retrieve.html">Retrieve</a>
             </li>
             <li class="nav-item">
               <a class="nav-link" href="delete.html">Delete</a>
@@ -121,21 +126,49 @@
 
         <!-- upload form -->
         <div data-aos="zoom-in" class="col py-3 data-upload my-3">
+          <h4 class="text-center mb-3">Upload a document</h4>
+          <p class="text-center text-muted">
+            The file is split into chunks and encrypted in this browser. Only
+            ciphertext is uploaded; only two hashes go on-chain.
+          </p>
+
+          <input id="doc-file" type="file" />
+
+          <label class="form-label mt-3" for="passphrase">
+            Passphrase
+            <span class="text-muted">(leave blank to publish unencrypted)</span>
+          </label>
           <input
-            onchange="get_Sha3()"
-            id="doc-file"
-            type="file"
-            accept="application/pdf, image/*"
+            id="passphrase"
+            class="form-control"
+            type="password"
+            autocomplete="new-password"
+            placeholder="Cannot be recovered if lost"
           />
-          <span id="note" class="text-danger"></span>
+
+          <label class="form-label mt-3" for="cipher-suite">Cipher suite</label>
+          <select id="cipher-suite" class="form-select"></select>
+
+          <span id="note" class="text-danger d-block my-2"></span>
           <img id="loader" class="d-none" src="files/loader.svg" alt="loader" />
-          <input
-            onclick="sendHash()"
+
+          <div id="chunk-progress" class="progress my-3 d-none" style="height: 22px">
+            <div
+              id="chunk-progress-bar"
+              class="progress-bar progress-bar-striped progress-bar-animated"
+              role="progressbar"
+              style="width: 0%"
+            ></div>
+          </div>
+
+          <button
+            onclick="uploadChunked()"
             class="btn upload-button main-button"
-            type="submit"
-            value="Upload document"
-            id="upload_file_button"
-          />
+            type="button"
+            id="chunked-upload-button"
+          >
+            Upload document
+          </button>
         </div>
       </div>
       <!-- Transaction information -->
@@ -144,8 +177,15 @@
         class="box gx-0 my-3 row mx-md-2 transaction-status col-lg"
       >
         <div class="left col-md-6 p-3 d-flex flex-column">
-          <span class="p-2 info" id="transaction-hash"></span>
-          <span class="p-2 info" id="file-hash"></span>
+          <span class="p-2 info text-break" id="transaction-hash"></span>
+          <span class="p-2 info text-break" id="file-hash"></span>
+          <span class="p-2 info text-break" id="merkle-root"></span>
+          <span class="p-2 info text-break" id="manifest-cid"></span>
+          <span class="p-2 info" id="chunk-summary"></span>
+          <span class="p-2 info text-break">
+            <i class="fa-solid fa-link mx-1"></i>
+            <a id="share-link" href="#" target="_blank" rel="noopener"></a>
+          </span>
           <span class="p-2 info" id="contract-address"></span>
           <span class="p-2 info" id="time-stamps"></span>
           <span class="p-2 info" id="blockNumber"></span>
@@ -157,11 +197,10 @@
               title="Download QR Code"
               href="#"
               id="download-link"
-              data-name="QR-Code"
-              class="download-link"
-              download="image.png"
+              class="download-link d-none"
+              download="oreochain-qr.png"
             >
-              Download QR-CODE
+              Download QR code
             </a>
           </span>
         </div>

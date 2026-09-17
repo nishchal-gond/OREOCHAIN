@@ -10,8 +10,10 @@
     />
     <link href="./css/aos.min.css" rel="stylesheet" />
     <script src="./js/aos.js"></script>
-    <script src="node_modules\web3\dist\web3.min.js"></script>
-    <script src="js/App.js"></script>
+    <script src="./node_modules/web3/dist/web3.min.js"></script>
+    <script src="./js/config.js"></script>
+    <script type="module" src="js/App.js"></script>
+    <script type="module" src="./js/chunked-app.js"></script>
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css"
@@ -66,6 +68,9 @@
               <a class="nav-link" href="upload.html">Upload</a>
             </li>
             <li class="nav-item">
+              <a class="nav-link" href="retrieve.html">Retrieve</a>
+            </li>
+            <li class="nav-item">
               <a class="nav-link" href="delete.html">Delete</a>
             </li>
 
@@ -98,36 +103,60 @@
     <div class="container">
       <!-- upload form -->
       <div data-aos="zoom-in" class="col p-3 data-upload my-3 mx-md-2">
-        <input onchange="get_Sha3()" id="doc-file" type="file" />
-        <span id="note" class="text-danger"></span>
-        <img id="loader" src="files/loader.svg" alt="loader" />
+        <h4 class="text-center mb-3">Verify a document</h4>
+        <p class="text-center text-muted">
+          Checks whether a file matches a record anchored on-chain. Nothing is
+          downloaded and no passphrase is needed — the file is hashed in your
+          browser and only the hash is looked up.
+        </p>
+
+        <input onchange="hashSelectedFile()" id="doc-file" type="file" />
+
+        <label class="form-label mt-3" for="lookup-hash">
+          …or paste a document hash
+        </label>
         <input
-          onclick="verify_Hash()"
-          class="btn mt-5 upload-button d-block main-button"
-          type="button"
-          value="Verify"
-          id="upload_file_button"
+          id="lookup-hash"
+          class="form-control"
+          type="text"
+          placeholder="0x…"
+          autocomplete="off"
+          spellcheck="false"
         />
+
+        <span id="note" class="text-danger d-block my-2"></span>
+        <img id="loader" class="d-none" src="files/loader.svg" alt="loader" />
+
+        <button
+          onclick="verifyRegistration()"
+          class="btn mt-4 upload-button d-block main-button"
+          type="button"
+          id="chunked-verify-button"
+        >
+          Verify
+        </button>
+
+        <p class="text-center mt-3">
+          <a href="retrieve.html">Need the file itself? Retrieve and decrypt it →</a>
+        </p>
       </div>
       <!-- Verification result -->
       <div class="box d-none my-3 row gx-0 mx-md-2 transaction-status col-lg">
         <div class="left col-lg-6 p-3 d-flex flex-column">
           <span class="p-2 info text-center" id="doc-status"></span>
-          <span class="p-2 info" id="file-hash"></span>
+          <span class="p-2 info text-break" id="file-hash"></span>
+          <span class="p-2 info text-break" id="merkle-root"></span>
+          <span class="p-2 info text-break" id="manifest-cid"></span>
+          <span class="p-2 info" id="chunk-summary"></span>
+          <span class="p-2 info text-break" id="exporter-address"></span>
           <span class="p-2 info" id="contract-address"></span>
           <span class="p-2 info" id="time-stamps"></span>
           <span class="p-2 info" id="blockNumber"></span>
           <span class="p-2 info" id="college-name"></span>
 
           <span class="d-flex justify-content-center">
-            <a
-              title="View Cirtificate on IPFS"
-              href="#"
-              id="download-document"
-              class="download-link"
-              target="_blank"
-            >
-              View Cirtificate
+            <a href="retrieve.html" class="download-link">
+              Retrieve document
             </a>
           </span>
         </div>

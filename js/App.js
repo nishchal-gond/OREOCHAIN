@@ -1,1069 +1,357 @@
-const PINATA_API_KEY = "50b5df13aede683fbc67";
-const PINATA_SECRET_API_KEY = "02e2332a30d4ff4c5dcc818d72f7c1f12735420136783417704318f0fa179535";
-window.CONTRACT = {
-  address: "0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8",
-  network: "Example : https://polygon-rpc.com/",
-  explore: "Example : https://polygonscan.com/",
-  abi: [
-    {
-      inputs: [],
-      stateMutability: "nonpayable",
-      type: "constructor",
-    },
-    {
-      anonymous: false,
-      inputs: [
-        {
-          indexed: true,
-          internalType: "address",
-          name: "_exporter",
-          type: "address",
-        },
-        {
-          indexed: false,
-          internalType: "string",
-          name: "_ipfsHash",
-          type: "string",
-        },
-      ],
-      name: "addHash",
-      type: "event",
-    },
-    {
-      inputs: [
-        {
-          internalType: "bytes32",
-          name: "hash",
-          type: "bytes32",
-        },
-        {
-          internalType: "string",
-          name: "_ipfs",
-          type: "string",
-        },
-      ],
-      name: "addDocHash",
-      outputs: [],
-      stateMutability: "nonpayable",
-      type: "function",
-    },
-    {
-      inputs: [
-        {
-          internalType: "address",
-          name: "_add",
-          type: "address",
-        },
-        {
-          internalType: "string",
-          name: "_info",
-          type: "string",
-        },
-      ],
-      name: "add_Exporter",
-      outputs: [],
-      stateMutability: "nonpayable",
-      type: "function",
-    },
-    {
-      inputs: [
-        {
-          internalType: "address",
-          name: "_add",
-          type: "address",
-        },
-        {
-          internalType: "string",
-          name: "_newInfo",
-          type: "string",
-        },
-      ],
-      name: "alter_Exporter",
-      outputs: [],
-      stateMutability: "nonpayable",
-      type: "function",
-    },
-    {
-      inputs: [
-        {
-          internalType: "address",
-          name: "_newOwner",
-          type: "address",
-        },
-      ],
-      name: "changeOwner",
-      outputs: [],
-      stateMutability: "nonpayable",
-      type: "function",
-    },
-    {
-      inputs: [],
-      name: "count_Exporters",
-      outputs: [
-        {
-          internalType: "uint16",
-          name: "",
-          type: "uint16",
-        },
-      ],
-      stateMutability: "view",
-      type: "function",
-    },
-    {
-      inputs: [],
-      name: "count_hashes",
-      outputs: [
-        {
-          internalType: "uint16",
-          name: "",
-          type: "uint16",
-        },
-      ],
-      stateMutability: "view",
-      type: "function",
-    },
-    {
-      inputs: [
-        {
-          internalType: "bytes32",
-          name: "_hash",
-          type: "bytes32",
-        },
-      ],
-      name: "deleteHash",
-      outputs: [],
-      stateMutability: "nonpayable",
-      type: "function",
-    },
-    {
-      inputs: [
-        {
-          internalType: "address",
-          name: "_add",
-          type: "address",
-        },
-      ],
-      name: "delete_Exporter",
-      outputs: [],
-      stateMutability: "nonpayable",
-      type: "function",
-    },
-    {
-      inputs: [
-        {
-          internalType: "bytes32",
-          name: "_hash",
-          type: "bytes32",
-        },
-      ],
-      name: "findDocHash",
-      outputs: [
-        {
-          internalType: "uint256",
-          name: "",
-          type: "uint256",
-        },
-        {
-          internalType: "uint256",
-          name: "",
-          type: "uint256",
-        },
-        {
-          internalType: "string",
-          name: "",
-          type: "string",
-        },
-        {
-          internalType: "string",
-          name: "",
-          type: "string",
-        },
-      ],
-      stateMutability: "view",
-      type: "function",
-    },
-    {
-      inputs: [
-        {
-          internalType: "address",
-          name: "_add",
-          type: "address",
-        },
-      ],
-      name: "getExporterInfo",
-      outputs: [
-        {
-          internalType: "string",
-          name: "",
-          type: "string",
-        },
-      ],
-      stateMutability: "view",
-      type: "function",
-    },
-    {
-      inputs: [],
-      name: "owner",
-      outputs: [
-        {
-          internalType: "address",
-          name: "",
-          type: "address",
-        },
-      ],
-      stateMutability: "view",
-      type: "function",
-    },
-  ],
-};
-//login
-async function connect() {
-  if (window.ethereum) {
-    try {
-      const selectedAccount = await window.ethereum
-        .request({
-          method: "eth_requestAccounts",
-        })
-        .then((accounts) => {
-          return accounts[0];
-        })
-        .catch(() => {
-          throw Error("No account selected 👍");
-        });
+/**
+ * Wallet session, chain helpers and exporter administration.
+ *
+ * The chunked upload/retrieval pipeline lives in js/chunked-app.js; this file
+ * covers everything around it — connecting MetaMask, reading the chain, and the
+ * owner-only exporter management used by admin.html.
+ *
+ * Configuration (contract address, network, storage) comes from js/config.js.
+ * Nothing secret is hardcoded here: the previous version of this file embedded
+ * a live Pinata API key and secret in client-side JavaScript, which meant every
+ * visitor could read them out of the page source.
+ */
 
-      window.userAddress = selectedAccount;
-      console.log(selectedAccount);
-      window.localStorage.setItem("userAddress", window.userAddress);
-      window.location.reload();
-    } catch (error) {}
-  } else {
-    $("#upload_file_button").attr("disabled", true);
-    $("#doc-file").attr("disabled", true);
-    // Show The Warning for not detecting wallet
-    document.querySelector(".alert").classList.remove("d-none");
+import { CHUNKED_VERIFICATION_ABI } from "./contract-abi.js";
+
+const CONFIG = globalThis.OREOCHAIN_CONFIG || {};
+const CONTRACT = {
+  address: null,
+  chainId: null,
+  explorer: "https://polygonscan.com",
+  ...(CONFIG.contract || {}),
+};
+
+window.CONTRACT = { ...CONTRACT, abi: CHUNKED_VERIFICATION_ABI };
+
+const CHAIN_NAMES = {
+  1: "Ethereum Mainnet",
+  11155111: "Sepolia Test Network",
+  137: "Polygon Mainnet",
+  80002: "Polygon Amoy Test Network",
+  56: "BNB Smart Chain",
+  42161: "Arbitrum One",
+  10: "OP Mainnet",
+  8453: "Base",
+  1337: "Local Development Chain",
+  31337: "Hardhat / Anvil",
+};
+
+// ------------------------------------------------------------------- utilities
+
+function el(id) {
+  return document.getElementById(id);
+}
+
+function note(message, tone = "info") {
+  const target = el("note");
+  if (target) target.innerHTML = `<h5 class="text-${tone} text-center">${message}</h5>`;
+}
+
+function configured() {
+  return Boolean(CONTRACT.address) && !/^0x0+$/.test(CONTRACT.address);
+}
+
+export function truncateAddress(address) {
+  if (!address || address.length < 16) return address || "";
+  return `${address.slice(0, 7)}…${address.slice(-8)}`;
+}
+
+export function getTime() {
+  return new Date().toISOString().replace("T", " ").slice(0, 19);
+}
+
+/** MetaMask reports custom errors as encoded data; translate the common ones. */
+function readableError(error) {
+  const text = `${(error && error.message) || error}`;
+  if (text.includes("NotOwner")) return "Only the contract owner can do that.";
+  if (text.includes("NotAuthorisedExporter")) return "This wallet is not an authorised exporter.";
+  if (text.includes("NotDocumentOwner")) return "Only the exporter that registered this document can revoke it.";
+  if (text.includes("AlreadyExists")) return "That entry already exists.";
+  if (text.includes("DoesNotExist")) return "No such entry.";
+  if (text.includes("User denied") || text.includes("user rejected")) return "Rejected in your wallet.";
+  return text;
+}
+
+// -------------------------------------------------------------- wallet session
+
+export async function connect() {
+  if (!window.ethereum) {
+    document.querySelector(".alert")?.classList.remove("d-none");
+    return;
+  }
+  try {
+    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    if (!accounts || accounts.length === 0) throw new Error("No account selected.");
+    window.localStorage.setItem("userAddress", accounts[0]);
+    window.location.reload();
+  } catch (error) {
+    note(readableError(error), "danger");
   }
 }
 
-window.onload = async () => {
-  if(window.location.href.indexOf("verify.html") > -1){
-    $("#loader").hide();
-    $(".loader-wraper").fadeOut("slow");
+export function disconnect() {
+  window.userAddress = null;
+  window.localStorage.removeItem("userAddress");
+  window.location.reload();
+}
 
-    //check the Url if it was Passed with document hash
-    $("#upload_file_button").attr("disabled", true);
-    checkURL();
+export async function get_ChainID() {
+  if (!window.web3) return null;
+  const id = Number(await window.web3.eth.getChainId());
+  window.chainID = CHAIN_NAMES[id] || `Chain ID ${id}`;
+
+  const target = el("network");
+  if (target) {
+    const mismatch = CONTRACT.chainId && id !== Number(CONTRACT.chainId);
+    target.innerHTML = `<i class="fa-solid fa-circle-nodes mx-2 text-${
+      mismatch ? "danger" : "info"
+    }"></i>${window.chainID}${mismatch ? " — wrong network for this contract" : ""}`;
+  }
+  return id;
+}
+
+export async function get_ethBalance() {
+  const target = el("userBalance");
+  if (!target || !window.web3 || !window.userAddress) return;
+  try {
+    const balance = await window.web3.eth.getBalance(window.userAddress);
+    const amount = Number(window.web3.utils.fromWei(balance, "ether")).toFixed(4);
+    target.innerHTML = `<i class="fa-brands fa-gg-circle mx-2 text-danger"></i>${amount}`;
+  } catch {
+    target.innerHTML = "n/a";
+  }
+}
+
+// ------------------------------------------------------------------- contract
+
+function contract() {
+  if (!window.web3) throw new Error("web3 is not loaded — install MetaMask.");
+  if (!configured()) {
+    throw new Error(
+      "No contract address configured. Copy js/config.example.js to js/config.js and set contract.address."
+    );
+  }
+  return new window.web3.eth.Contract(CHUNKED_VERIFICATION_ABI, CONTRACT.address);
+}
+
+export async function getExporterInfo() {
+  try {
+    const result = await contract().methods.getExporter(window.userAddress).call();
+    window.info = result[1] || result.info || "";
+    const target = el("Exporter-info");
+    if (target) {
+      target.innerHTML = window.info
+        ? `<i class="fa-solid fa-building-columns mx-2 text-warning"></i>${window.info}`
+        : `<i class="fa-solid fa-triangle-exclamation mx-2 text-warning"></i>Not an authorised exporter`;
+    }
+    return window.info;
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+}
+
+export async function getCounters() {
+  try {
+    const instance = contract();
+    const [documents, exporters] = await Promise.all([
+      instance.methods.documentCount().call(),
+      instance.methods.exporterCount().call(),
+    ]);
+    const docs = el("num-hashes");
+    const exps = el("num-exporters");
+    if (docs) docs.innerHTML = `<i class="fa-solid fa-file-lines mx-2 text-warning"></i>Documents: ${documents}`;
+    if (exps) exps.innerHTML = `<i class="fa-solid fa-users mx-2 text-warning"></i>Exporters: ${exporters}`;
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function adminAction(label, build) {
+  const address = el("Exporter-address")?.value.trim();
+  if (!window.web3?.utils.isAddress(address)) {
+    note("Enter a valid wallet address.", "danger");
+    return;
+  }
+  el("loader")?.classList.remove("d-none");
+  note(`${label} — confirm in your wallet…`);
+  try {
+    await build(contract(), address).send({ from: window.userAddress });
+    note(`${label} confirmed.`, "success");
+    await getCounters();
+  } catch (error) {
+    note(readableError(error), "danger");
+    console.error(error);
+  } finally {
+    el("loader")?.classList.add("d-none");
+  }
+}
+
+export function addExporter() {
+  const info = el("info")?.value.trim() || "";
+  if (!info) {
+    note("Enter the exporter's name or label.", "danger");
+    return;
+  }
+  return adminAction("Adding exporter", (c, address) => c.methods.addExporter(address, info));
+}
+
+export function editExporter() {
+  const info = el("info")?.value.trim() || "";
+  if (!info) {
+    note("Enter the new name or label.", "danger");
+    return;
+  }
+  return adminAction("Updating exporter", (c, address) => c.methods.updateExporter(address, info));
+}
+
+export function deleteExporter() {
+  return adminAction("Removing exporter", (c, address) => c.methods.removeExporter(address));
+}
+
+/**
+ * Revoke a document's on-chain record.
+ *
+ * The hash is computed from the selected file with SHA-256 over its raw bytes,
+ * matching js/core/chunker.js. The previous implementation read files as UTF-8
+ * text, which corrupted every non-text byte before hashing.
+ */
+export async function deleteHash() {
+  const file = el("doc-file")?.files?.[0];
+  if (!file) {
+    note("Choose the document to revoke.", "danger");
+    return;
+  }
+  el("loader")?.classList.remove("d-none");
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    const fileHash =
+      "0x" + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+
+    note("Confirm the transaction in your wallet…");
+    await contract().methods.revokeDocument(fileHash).send({ from: window.userAddress });
+    note(
+      "Record revoked on-chain. Note that chunks already pinned off-chain are not deleted.",
+      "success"
+    );
+  } catch (error) {
+    note(readableError(error), "danger");
+    console.error(error);
+  } finally {
+    el("loader")?.classList.add("d-none");
+  }
+}
+
+/** Recent registrations, read from contract events. */
+export async function listen() {
+  const container = document.querySelector(".transactions");
+  if (!container || !configured()) return;
+
+  const loading = document.querySelector(".loading-tx");
+  loading?.classList.remove("d-none");
+  try {
+    const latest = Number(await window.web3.eth.getBlockNumber());
+    const events = await contract().getPastEvents("DocumentRegistered", {
+      fromBlock: Math.max(0, latest - 50000),
+      toBlock: "latest",
+    });
+
+    el("recent-header")?.classList.remove("d-none");
+    container.innerHTML = events
+      .slice(-12)
+      .reverse()
+      .map((event) => {
+        const { fileHash, totalChunks, encrypted } = event.returnValues;
+        return `<div class="col-lg-5 tx-card p-3 m-2">
+          <div class="text-break"><i class="fa-solid fa-hashtag mx-1"></i>${truncateAddress(
+            fileHash
+          )}</div>
+          <div><i class="fa-solid fa-layer-group mx-1"></i>${totalChunks} chunks · ${
+          encrypted ? "encrypted" : "public"
+        }</div>
+          <div><i class="fa-solid fa-cube mx-1"></i>Block ${event.blockNumber}</div>
+          <a target="_blank" rel="noopener" href="${CONTRACT.explorer}/tx/${
+          event.transactionHash
+        }">View transaction</a>
+        </div>`;
+      })
+      .join("");
+  } catch (error) {
+    console.error(error);
+  } finally {
+    loading?.classList.add("d-none");
+  }
+}
+
+// ----------------------------------------------------------------- page set-up
+
+window.addEventListener("load", async () => {
+  document.querySelector(".loader-wraper")?.classList.add("d-none");
+  el("loader")?.classList.add("d-none");
+  document.querySelector(".transaction-status")?.classList.add("d-none");
+
+  if (!configured()) {
+    note(
+      "No contract configured yet. Copy <code>js/config.example.js</code> to <code>js/config.js</code> and set your deployed contract address.",
+      "warning"
+    );
   }
 
-  $("#loginButton").hide();
-  $("#recent-header").hide();
-  $(".loader-wraper").fadeOut("slow");
-  hide_txInfo();
-  $("#upload_file_button").attr("disabled", true);
+  if (!window.ethereum) {
+    el("loginButton")?.classList.add("d-none");
+    el("logoutButton")?.classList.add("d-none");
+    document.querySelector(".alert")?.classList.remove("d-none");
+    return;
+  }
 
+  window.web3 = new Web3(window.ethereum);
   window.userAddress = window.localStorage.getItem("userAddress");
 
-  if (window.ethereum) {
-    //gere we need MetaMask to read and write to our Contract
-    window.web3 = new Web3(window.ethereum);
-    window.contract = new window.web3.eth.Contract(
-      window.CONTRACT.abi,
-      window.CONTRACT.address
-    );
-    //checking if user loged in
-    if (window.userAddress.length > 10) {
-      // let isLocked =await window.ethereum._metamask.isUnlocked();
-      //  if(!isLocked) disconnect();
-      $("#logoutButton").show();
-      $("#loginButton").hide();
-      $("#userAddress")
-        .html(`<i class="fa-solid fa-address-card mx-2 text-primary"></i>${truncateAddress(
-        window.userAddress
-      )}
-       <a class="text-info" href="${window.CONTRACT.explore}/address/${
-        window.userAddress
-      }" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-square-arrow-up-right text-warning"></i></a>  
-       </a>`);
+  const signedIn = Boolean(window.userAddress && window.userAddress.length > 10);
+  el("loginButton")?.classList.toggle("d-none", signedIn);
+  el("logoutButton")?.classList.toggle("d-none", !signedIn);
+  if (!signedIn) return;
 
-      //if admin is viewed then show the doc,exporter counters
-      if (window.location.pathname == "/admin.html") await getCounters();
-
-      await getExporterInfo();
-      await get_ChainID();
-      await get_ethBalance();
-      $("#Exporter-info").html(
-        `<i class="fa-solid fa-building-columns mx-2 text-warning"></i>${window.info}`
-      );
-
-      setTimeout(() => {
-        listen();
-      }, 0);
-    } else {
-      $("#logoutButton").hide();
-      $("#loginButton").show();
-      $("#upload_file_button").attr("disabled", true);
-      $("#doc-file").attr("disabled", true);
-      $(".box").addClass("d-none");
-      $(".loading-tx").addClass("d-none");
-    }
-  } else {
-    //No metamask detected
-    $("#logoutButton").hide();
-    $("#loginButton").hide();
-    $(".box").addClass("d-none");
-    $("#upload_file_button").attr("disabled", true);
-    $("#doc-file").attr("disabled", true);
-    document.querySelector(".alert").classList.remove("d-none");
-
-    // alert("Please download metamask extension first.\nhttps://metamask.io/download/");
-    // window.location = "https://metamask.io/download/"
+  const addressField = el("userAddress");
+  if (addressField) {
+    addressField.innerHTML = `<i class="fa-solid fa-address-card mx-2 text-primary"></i>${truncateAddress(
+      window.userAddress
+    )} <a class="text-info" target="_blank" rel="noopener" href="${CONTRACT.explorer}/address/${
+      window.userAddress
+    }"><i class="fa-solid fa-square-arrow-up-right text-warning"></i></a>`;
   }
-};
 
-async function verify_Hash() {
-  //Show the loading
-  $("#loader").show();
-
-  if (window.hashedfile) {
-    /*   I used the contract address (window.CONTRACT.address) as the caller of the function 'findDocHash'
-        you can use any address because it used just for reading info from the contract
-    */
-    await contract.methods
-      .findDocHash(window.hashedfile)
-      .call({ from: window.userAddress })
-      .then((result) => {
-        $(".transaction-status").removeClass("d-none");
-        window.newHash = result;
-        if ((result[0] != 0) & (result[1] != 0)) {
-          //Doc Verified
-          print_verification_info(result, true);
-        } else {
-          //Doc not Verified
-          print_verification_info(result, false);
-        }
-      });
+  await get_ChainID();
+  await get_ethBalance();
+  if (configured()) {
+    await getExporterInfo();
+    if (location.pathname.endsWith("admin.html")) await getCounters();
+    await listen();
   }
-}
-
-function checkURL() {
-  let url_string = window.location.href;
-  let url = new URL(url_string);
-  window.hashedfile = url.searchParams.get("hash");
-  if (!window.hashedfile) return;
-
-  verify_Hash();
-}
-// get Sha3 Hash from the file
-async function get_Sha3() {
-  $("#note").html(`<h5 class="text-warning">Hashing Your Document 😴...</h5>`);
-  $("#upload_file_button").attr("disabled", false);
-  console.log("file changed");
-  var file = await document.getElementById("doc-file").files[0];
-  if (file) {
-    var reader = new FileReader();
-    reader.readAsText(file, "UTF-8");
-    reader.onload = async function (evt) {
-      // var SHA256 = new Hashes.SHA256();
-      // = SHA256.hex(evt.target.result);
-      window.hashedfile = await web3.utils.soliditySha3(evt.target.result);
-      console.log(`Document Hash : ${window.hashedfile}`);
-      $("#note").html(
-        `<h5 class="text-center text-info">Document Hashed  😎 </h5>`
-      );
-    };
-    reader.onerror = function (evt) {
-      console.log("error reading file");
-      return false;
-    };
-  } else {
-    window.hashedfile = null;
-    return false;
-  }
-}
-
-function print_verification_info(result, is_verified) {
-  //Default Image for not Verified Docunets
-  document.getElementById("student-document").src = "./files/notvalid.svg";
-  $("#loader").hide();
-  // when document not verfied
-  if (!is_verified) {
-    // document.getElementById('download-document').classList.add('d-none')
-    $("#download-document").hide();
-    $("#doc-status").html(`<h3 class="text-danger">
-        Certificate not Verified 😕
-         <i class="text-danger  fa fa-times-circle" aria-hidden="true"></i>
-        </h3>`);
-    $("#file-hash").html(
-      `<span class="text-info"><i class="fa-solid fa-hashtag"></i></span> ${truncateAddress(
-        window.hashedfile
-      )}`
-    );
-    $("#college-name").hide();
-    $("#contract-address").hide();
-    $("#time-stamps").hide();
-    $("#blockNumber").hide();
-    $(".transaction-status").show();
-  } else {
-    $("#download-document").show();
-    // when document verfied
-    $("#college-name").show();
-    $("#contract-address").show();
-    $("#time-stamps").show();
-    $("#blockNumber").show();
-
-    var t = new Date(1970, 0, 1);
-    t.setSeconds(result[1]);
-    console.log(result[1]);
-    t.setHours(t.getHours() + 3);
-    // hide loader
-    $("#loader").hide();
-    $("#doc-status").html(`<h3 class="text-info">
-         Certificate Verified Successfully 😊
-         <i class="text-info fa fa-check-circle" aria-hidden="true"></i>
-        </h3>`);
-    $("#file-hash").html(
-      `<span class="text-info"><i class="fa-solid fa-hashtag"></i></span> ${truncateAddress(
-        window.hashedfile
-      )}`
-    );
-    $("#college-name").html(
-      `<span class="text-info"><i class="fa-solid fa-graduation-cap"></i></span> ${result[2]}`
-    );
-    $("#contract-address").html(
-      `<span class="text-info"><i class="fa-solid fa-file-contract"></i> </span>${truncateAddress(
-        window.CONTRACT.address
-      )}`
-    );
-    $("#time-stamps").html(
-      `<span class="text-info"><i class="fa-solid fa-clock"></i> </span>${t}`
-    );
-    $("#blockNumber").html(
-      `<span class="text-info"><i class="fa-solid fa-cube"></i></span> ${result[0]}`
-    );
-    document.getElementById(
-      "student-document"
-    ).src = `https://ipfs.io/ipfs/${result[3]}`;
-    document.getElementById("download-document").href =
-      document.getElementById("student-document").src;
-    $(".transaction-status").show();
-  }
-}
-
-function hide_txInfo() {
-  $(".transaction-status").addClass("d-none");
-}
-
-function show_txInfo() {
-  $(".transaction-status").removeClass("d-none");
-}
-async function get_ethBalance() {
-  await web3.eth.getBalance(window.userAddress, function (err, balance) {
-    if (err === null) {
-      $("#userBalance").html(
-        "<i class='fa-brands fa-gg-circle mx-2 text-danger'></i>" +
-          web3.utils.fromWei(balance).substr(0, 6) +
-          ""
-      );
-    } else $("#userBalance").html("n/a");
-  });
-}
+});
 
 if (window.ethereum) {
-  window.ethereum.on("accountsChanged", function (accounts) {
-    connect();
+  window.ethereum.on("accountsChanged", () => {
+    window.localStorage.removeItem("userAddress");
+    window.location.reload();
   });
+  window.ethereum.on("chainChanged", () => window.location.reload());
 }
 
-function printUploadInfo(result) {
-  $("#transaction-hash").html(
-    `<a target="_blank" title="View Transaction at Polygon Scan" href="${window.CONTRACT.explore}/tx/` +
-      result.transactionHash +
-      '"+><i class="fa fa-check-circle font-size-2 mx-1 text-white mx-1"></i></a>' +
-      truncateAddress(result.transactionHash)
-  );
-  $("#file-hash").html(
-    `<i class="fa-solid fa-hashtag mx-1"></i> ${truncateAddress(
-      window.hashedfile
-    )}`
-  );
-  $("#contract-address").html(
-    `<i class="fa-solid fa-file-contract mx-1"></i> ${truncateAddress(
-      result.to
-    )}`
-  );
-  $("#time-stamps").html('<i class="fa-solid fa-clock mx-1"></i>' + getTime());
-  $("#blockNumber").html(
-    `<i class="fa-solid fa-link mx-1"></i>${result.blockNumber}`
-  );
-  $("#blockHash").html(
-    `<i class="fa-solid fa-shield mx-1"></i> ${truncateAddress(
-      result.blockHash
-    )}`
-  );
-  $("#to-netowrk").html(
-    `<i class="fa-solid fa-chart-network"></i> ${window.chainID}`
-  );
-  $("#to-netowrk").hide();
-  $("#gas-used").html(
-    `<i class="fa-solid fa-gas-pump mx-1"></i> ${result.gasUsed} Gwei`
-  );
-  $("#loader").addClass("d-none");
-  $("#upload_file_button").addClass("d-block");
-  show_txInfo();
-  get_ethBalance();
-
-  $("#note").html(`<h5 class="text-info">
-   Transaction Confirmed to the BlockChain 😊<i class="mx-2 text-info fa fa-check-circle" aria-hidden="true"></i>
-   </h5>`);
-  listen();
-}
-
-async function getFilebinInfo(filebinUrl, filebinId) {
-  try {
-    const response = await fetch(
-      `https://api.pdfrest.com/resource/${window.hashedfile}?format=url`,
-      {
-        method: "GET",
-        headers: {},
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        "Failed to retrieve file information:",
-        await response.text()
-      );
-    }
-
-    const data = await response.json();
-    console.log(data); // This should contain information about the uploaded file
-    return data;
-  } catch (error) {
-    console.error("Error fetching file information:", error);
-    throw error; // Re-throw for potential handling in calling code
-  }
-}
-
-
-
-async function uploadFileToIpfs() {
-  const fileInput = document.getElementById("doc-file"); // Ensure an input element with id 'doc-file'
-  const file = fileInput.files[0];
-
-  if (!file) {
-    console.error("No file selected");
-    return;
-  }
-
-  const formData = new FormData();
-  formData.append("file", file);
-
-  // Optional metadata
-  const pinataMetadata = JSON.stringify({ name: file.name });
-  formData.append("pinataMetadata", pinataMetadata);
-
-  // Optional settings
-  const pinataOptions = JSON.stringify({ cidVersion: 1 });
-  formData.append("pinataOptions", pinataOptions);
-
-  try {
-    // Send request to Pinata
-    const response = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
-      method: "POST",
-      body: formData,
-      headers: {
-        "pinata_api_key": PINATA_API_KEY,
-        "pinata_secret_api_key": PINATA_SECRET_API_KEY,
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error("File upload failed");
-    }
-
-    const data = await response.json();
-    console.log("File uploaded successfully:", data.IpfsHash); // Logs the CID
-    return data.IpfsHash; // Return CID for smart contract storage
-  } catch (error) {
-    console.error("Error uploading file:", error);
-    throw error;
-  }
-}
-
-async function sendHash() {
-  $("#loader").removeClass("d-none");
-  $("#upload_file_button").slideUp();
-  $("#note").html(
-    `<h5 class="text-info">Please confirm the transaction 🙂</h5>`
-  );
-  $("#upload_file_button").attr("disabled", true);
-  get_ChainID();
-  // Initilize Ipfs
-  // https://api.pdfrest.com/resource/21c2cbf2d-eb79-4eef-be3e-303b98d26f8c?format=url
-  // https://api.pdfrest.com/resource/2ff49040b-a696-44ce-a705-1c1ca69d51c8?format=url
-  // =================================================
-  // await getFilebinInfo();
-  // await uploadFileToBin();
-  const CID = await uploadFileToIpfs();
-  await uploadFileToIpfs();
-  if (window.hashedfile.length > 4) {
-    await window.contract.methods
-      .addDocHash(window.hashedfile, CID)
-      .send({ from: window.userAddress })
-      .on("transactionHash", function (_hash) {
-        $("#note").html(
-          `<h5 class="text-info p-1 text-center">Please wait for transaction to be mined...</h5>`
-        );
-      })
-
-      .on("receipt", function (receipt) {
-        printUploadInfo(receipt);
-        generateQRCode();
-      })
-
-      .on("confirmation", function (confirmationNr) {})
-      .on("error", function (error) {
-        console.log(error.message);
-        $("#note").html(`<h5 class="text-center">${error.message} 😏</h5>`);
-        $("#loader").addClass("d-none");
-        $("#upload_file_button").slideDown();
-      });
-  }
-}
-
-//delete document hash from the contract
-//only the exporter who add it can delete it
-async function deleteHash() {
-  $("#loader").removeClass("d-none");
-  $("#upload_file_button").slideUp();
-  $("#note").html(
-    `<h5 class="text-info">Please confirm the transaction 🙂</h5>`
-  );
-  $("#upload_file_button").attr("disabled", true);
-  get_ChainID();
-
-  if (window.hashedfile) {
-    await window.contract.methods
-      .deleteHash(window.hashedfile)
-      .send({ from: window.userAddress })
-      .on("transactionHash", function (hash) {
-        $("#note").html(
-          `<h5 class="text-info p-1 text-center">Please wait for transaction to be mined 😴</h5>`
-        );
-      })
-
-      .on("receipt", function (receipt) {
-        $("#note").html(
-          `<h5 class="text-info p-1 text-center">Document Deleted 😳</h5>`
-        );
-
-        $("#loader").addClass("d-none");
-        $("#upload_file_button").slideDown();
-      })
-
-      .on("confirmation", function (confirmationNr) {
-        console.log(confirmationNr);
-      })
-      .on("error", function (error) {
-        console.log(error.message);
-        $("#note").html(`<h5 class="text-center">${error.message}</h5>`);
-        $("#loader").addClass("d-none");
-        $("#upload_file_button").slideDown();
-      });
-  }
-}
-
-//get current time
-function getTime() {
-  let d = new Date();
-  a =
-    d.getFullYear() +
-    "-" +
-    (d.getMonth() + 1) +
-    "-" +
-    d.getDate() +
-    " - " +
-    d.getHours() +
-    ":" +
-    d.getMinutes() +
-    ":" +
-    d.getSeconds();
-  return a;
-}
-
-//get network name based on ID
-async function get_ChainID() {
-  let a = await web3.eth.getChainId();
-  console.log(a);
-  switch (a) {
-    case 1:
-      window.chainID = "Ethereum Main Network (Mainnet)";
-      break;
-    case 80001:
-      window.chainID = "Polygon Test Network";
-      break;
-    case 137:
-      window.chainID = "Polygon Mainnet";
-      break;
-    case 3:
-      window.chainID = "Ropsten Test Network";
-      break;
-    case 4:
-      window.chainID = "Rinkeby Test Network";
-      break;
-    case 5:
-      window.chainID = "Goerli Test Network";
-      break;
-    case 42:
-      window.chainID = "Kovan Test Network";
-      break;
-    default:
-      window.chainID = "Uknnown ChainID";
-      break;
-  }
-  let network = document.getElementById("network");
-  if (network) {
-    document.getElementById(
-      "network"
-    ).innerHTML = `<i class="text-info fa-solid fa-circle-nodes mx-2"></i>${window.chainID}`;
-  }
-}
-
-function get_Sha3() {
-  hide_txInfo();
-  $("#note").html(`<h5 class="text-warning">Hashing Your Document 😴...</h5>`);
-
-  $("#upload_file_button").attr("disabled", false);
-
-  console.log("file changed");
-
-  var file = document.getElementById("doc-file").files[0];
-  if (file) {
-    var reader = new FileReader();
-    reader.readAsText(file, "UTF-8");
-    reader.onload = function (evt) {
-      // var SHA256 = new Hashes.SHA256();
-      // = SHA256.hex(evt.target.result);
-      window.hashedfile = web3.utils.soliditySha3(evt.target.result);
-      console.log(`Document Hash : ${window.hashedfile}`);
-      $("#note").html(
-        `<h5 class="text-center text-info">Document Hashed  😎 </h5>`
-      );
-    };
-    reader.onerror = function (evt) {
-      console.log("error reading file");
-    };
-  } else {
-    window.hashedfile = null;
-  }
-}
-
-//logout
-function disconnect() {
-  $("#logoutButton").hide();
-  $("#loginButton").show();
-  window.userAddress = null;
-  $(".wallet-status").addClass("d-none");
-  window.localStorage.setItem("userAddress", null);
-  $("#upload_file_button").addClass("disabled");
-}
-
-//shortcut wallet address
-function truncateAddress(address) {
-  if (!address) {
-    return;
-  }
-  return `${address.substr(0, 7)}...${address.substr(
-    address.length - 8,
-    address.length
-  )}`;
-}
-
-async function addExporter() {
-  const address = document.getElementById("Exporter-address").value;
-  const info = document.getElementById("info").value;
-
-  if (info && address) {
-    $("#loader").removeClass("d-none");
-    $("#ExporterBtn").slideUp();
-    $("#edit").slideUp();
-    $("#delete").slideUp();
-    $("#note").html(
-      `<h5 class="text-info">Please confirm the transaction 👍...</h5>`
-    );
-    $("#ExporterBtn").attr("disabled", true);
-    $("#delete").attr("disabled", true);
-    $("#edit").attr("disabled", true);
-    get_ChainID();
-
-    try {
-      await window.contract.methods
-        .add_Exporter(address, info)
-        .send({ from: window.userAddress })
-
-        .on("transactionHash", function (hash) {
-          $("#note").html(
-            `<h5 class="text-info p-1 text-center">Please wait for transaction to be mined 😴...</h5>`
-          );
-        })
-
-        .on("receipt", function (receipt) {
-          $("#loader").addClass("d-none");
-          $("#ExporterBtn").slideDown();
-          $("#edit").slideDown();
-          $("#delete").slideDown();
-          console.log(receipt);
-          $("#note").html(
-            `<h5 class="text-info">Exporter Added to the Blockchain 😇</h5>`
-          );
-        })
-
-        .on("confirmation", function (confirmationNr) {})
-        .on("error", function (error) {
-          console.log(error.message);
-          $("#note").html(`<h5 class="text-center">${error.message}</h5>`);
-          $("#loader").addClass("d-none");
-          $("#ExporterBtn").slideDown();
-        });
-    } catch (error) {
-      $("#note").html(`<h5 class="text-center">${error.message}</h5>`);
-      $("#loader").addClass("d-none");
-      $("#ExporterBtn").slideDown();
-      $("#edit").slideDown();
-      $("#delete").slideDown();
-    }
-  } else {
-    $("#note").html(
-      `<h5 class="text-center text-warning">You need to provide address & inforamtion to add  </h5>`
-    );
-  }
-}
-
-async function getExporterInfo() {
-  await window.contract.methods
-    .getExporterInfo(window.userAddress)
-    .call({ from: window.userAddress })
-
-    .then((result) => {
-      window.info = result;
-    });
-}
-
-async function getCounters() {
-  await window.contract.methods
-    .count_Exporters()
-    .call({ from: window.userAddress })
-
-    .then((result) => {
-      $("#num-exporters").html(
-        `<i class="fa-solid fa-building-columns mx-2 text-info"></i>${result}`
-      );
-    });
-  await window.contract.methods
-    .count_hashes()
-    .call({ from: window.userAddress })
-
-    .then((result) => {
-      $("#num-hashes").html(
-        `<i class="fa-solid fa-file mx-2 text-warning"></i>${result}`
-      );
-    });
-}
-
-async function editExporter() {
-  const address = document.getElementById("Exporter-address").value;
-  const info = document.getElementById("info").value;
-
-  if (info && address) {
-    $("#loader").removeClass("d-none");
-    $("#ExporterBtn").slideUp();
-    $("#edit").slideUp();
-    $("#delete").slideUp();
-    $("#note").html(
-      `<h5 class="text-info">Please confirm the transaction 😴...</h5>`
-    );
-    $("#ExporterBtn").attr("disabled", true);
-    get_ChainID();
-
-    try {
-      await window.contract.methods
-        .alter_Exporter(address, info)
-        .send({ from: window.userAddress })
-
-        .on("transactionHash", function (hash) {
-          $("#note").html(
-            `<h5 class="text-info p-1 text-center">Please wait for transaction to be mined 😇...</h5>`
-          );
-        })
-
-        .on("receipt", function (receipt) {
-          $("#loader").addClass("d-none");
-          $("#ExporterBtn").slideDown();
-          console.log(receipt);
-          $("#note").html(
-            `<h5 class="text-info">Exporter Updated Successfully 😊</h5>`
-          );
-        })
-
-        .on("confirmation", function (confirmationNr) {})
-        .on("error", function (error) {
-          console.log(error.message);
-          $("#note").html(`<h5 class="text-center">${error.message} 👍</h5>`);
-          $("#loader").addClass("d-none");
-          $("#ExporterBtn").slideDown();
-        });
-    } catch (error) {
-      $("#note").html(`<h5 class="text-center">${error.message} 👍</h5>`);
-      $("#loader").addClass("d-none");
-      $("#ExporterBtn").slideDown();
-      $("#edit").slideDown();
-      $("#delete").slideDown();
-    }
-  } else {
-    $("#note").html(
-      `<h5 class="text-center text-warning">You need to provide address & inforamtion to update 😵‍💫 </h5>`
-    );
-  }
-}
-
-async function deleteExporter() {
-  const address = document.getElementById("Exporter-address").value;
-
-  if (address) {
-    $("#loader").removeClass("d-none");
-    $("#ExporterBtn").slideUp();
-    $("#edit").slideUp();
-    $("#delete").slideUp();
-    $("#note").html(
-      `<h5 class="text-info">Please confirm the transaction 😕...</h5>`
-    );
-    $("#ExporterBtn").attr("disabled", true);
-    get_ChainID();
-
-    try {
-      await window.contract.methods
-        .delete_Exporter(address)
-        .send({ from: window.userAddress })
-
-        .on("transactionHash", function (hash) {
-          $("#note").html(
-            `<h5 class="text-info p-1 text-center">Please wait for transaction to be mined 😴 ...</h5>`
-          );
-        })
-
-        .on("receipt", function (receipt) {
-          $("#loader").addClass("d-none");
-          $("#ExporterBtn").slideDown();
-          $("#edit").slideDown();
-          $("#delete").slideDown();
-          console.log(receipt);
-          $("#note").html(
-            `<h5 class="text-info">Exporter Deleted Successfully 🙂</h5>`
-          );
-        })
-        .on("error", function (error) {
-          console.log(error.message);
-          $("#note").html(`<h5 class="text-center">${error.message} 🙂</h5>`);
-          $("#loader").addClass("d-none");
-          $("#ExporterBtn").slideDown();
-          $("#edit").slideDown();
-          $("#delete").slideDown();
-        });
-    } catch (error) {
-      $("#note").html(`<h5 class="text-center">${error.message} 🙂</h5>`);
-      $("#loader").addClass("d-none");
-      $("#ExporterBtn").slideDown();
-      $("#edit").slideDown();
-      $("#delete").slideDown();
-    }
-  } else {
-    $("#note").html(
-      `<h5 class="text-center text-warning">You need to provide address to delete 👍</h5>`
-    );
-  }
-}
-
-// Generate QR code so any one an Verify the documents
-//note: if you r using local server you need to replace 127.0.0.1 with your machine local ip address got from the router
-function generateQRCode() {
-  document.getElementById("qrcode").innerHTML = "";
-  console.log("making qr-code...");
-  var qrcode = new QRCode(document.getElementById("qrcode"), {
-    colorDark: "#000",
-    colorLight: "#fff",
-    correctLevel: QRCode.CorrectLevel.H,
-  });
-  if (!window.hashedfile) return;
-  let url = `${window.location.host}/verify.html?hash=${window.hashedfile}`;
-  qrcode.makeCode(url);
-  document.getElementById("download-link").download =
-    document.getElementById("doc-file").files[0].name;
-  document.getElementById("verfiy").href =
-    window.location.protocol + "//" + url;
-
-  function makeDownload() {
-    document.getElementById("download-link").href =
-      document.querySelector("#qrcode img").src;
-  }
-  setTimeout(makeDownload, 500);
-  //  makeDownload();
-}
-
-//check old transaction and show them if exist
-//Transactions in last afew hours will show but very old transactions wont show
-// cuz the pastEvents returns transactions in last 999 block
-async function listen() {
-  console.log("started...");
-  if (window.location.pathname != "/upload.html") return;
-  document.querySelector(".loading-tx").classList.remove("d-none");
-  window.web3 = new Web3(window.ethereum);
-  window.contract = new window.web3.eth.Contract(
-    window.CONTRACT.abi,
-    window.CONTRACT.address
-  );
-
-  await window.contract.getPastEvents(
-    "addHash",
-    {
-      filter: {
-        _exporter: window.userAddress, //Only get the documents uploaded by current Exporter
-      },
-      fromBlock: (await window.web3.eth.getBlockNumber()) - 999,
-      toBlock: "latest",
-    },
-    function (error, events) {
-      printTransactions(events);
-      console.log(events);
-    }
-  );
-}
-
-//If there is past tx then show them
-function printTransactions(data) {
-  document.querySelector(".transactions").innerHTML = "";
-  document.querySelector(".loading-tx").classList.add("d-none");
-  if (!data.length) {
-    $("#recent-header").hide();
-    return;
-  }
-  const main = document.querySelector(".transactions");
-  for (let i = 0; i < data.length; i++) {
-    const a = document.createElement("a");
-    a.href = `${window.CONTRACT.explore}` + "/tx/" + data[i].transactionHash;
-    a.setAttribute("target", "_blank");
-    a.className =
-      "col-lg-3 col-md-4 col-sm-5 m-2  bg-dark text-light rounded position-relative card";
-    a.style = "overflow:hidden;";
-    const image = document.createElement("object");
-    image.style = "width:100%;height: 100%;";
-
-    image.data = `https://ipfs.io/ipfs/${data[i].returnValues[1]}`;
-    const num = document.createElement("h1");
-    num.append(document.createTextNode(i + 1));
-    a.appendChild(image);
-    num.style =
-      "position:absolute; left:4px; bottom: -20px;font-size:4rem; color: rgba(20, 63, 74, 0.35);";
-    a.appendChild(num);
-    main.prepend(a);
-  }
-  $("#recent-header").show();
-}
+// The pages use inline handlers, so these must be globals.
+Object.assign(window, {
+  connect,
+  disconnect,
+  addExporter,
+  editExporter,
+  deleteExporter,
+  deleteHash,
+  getCounters,
+  getExporterInfo,
+  get_ChainID,
+  get_ethBalance,
+  getTime,
+  listen,
+  truncateAddress,
+});

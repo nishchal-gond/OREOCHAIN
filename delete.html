@@ -9,8 +9,9 @@
       rel="stylesheet"
     />
     <link href="./css/aos.min.css" rel="stylesheet" />
-    <script src="node_modules\web3\dist\web3.min.js"></script>
-    <script src="js/App.js"></script>
+    <script src="./node_modules/web3/dist/web3.min.js"></script>
+    <script src="./js/config.js"></script>
+    <script type="module" src="js/App.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css" integrity="sha512-KfkfwYDsLkIlwQp6LFnl8zNdLGxu9YAA1QvwINks4PhcElQSvqcyVLLD9aMhXd13uQjoXtEKNosOWaZqXgel0g==" crossorigin="anonymous" referrerpolicy="no-referrer" />    <link rel="stylesheet" href="css/main.css" />
     <link rel="icon" href="./assets/images/icon.png" />
     <title>Delete Document</title>
@@ -84,7 +85,7 @@
           </div>
         
           <div data-aos="zoom-in" class="col-lg-6 py-3 data-upload my-3 mx-md-2">
-            <input onchange="get_Sha3()"  id="doc-file" type="file"/>
+            <input id="doc-file" type="file"/>
             
             <span id="note" class="text-danger"
               ></span
@@ -179,9 +180,11 @@
     <div >
       <i onclick="topFunction()" id="scroll-btn" class="fa-solid fa-angle-up"></i>
     </div>
-    <div><a href="mailto:ugond07@gmail.com?subject=From OrioChain Site"> 
-      <i class="mail-us fa-solid fa-headset"></i>
-    </a>
+    <div>
+      <a href="mailto:ugond07@gmail.com?subject=From OrioChain Site">
+        <i class="mail-us fa-solid fa-headset"></i>
+      </a>
+    </div>
     <script src="./js/aos.js"></script>
     <script src="./js/script.js"></script>
     <script
