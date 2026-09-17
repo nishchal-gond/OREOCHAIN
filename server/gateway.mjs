@@ -260,7 +260,13 @@ export function createHandler(config, backend, deps = {}) {
           return;
         }
 
-        const quota = limiter.take(auth.keyId);
+        // Anonymous callers share a key id, so bucket them by source address
+        // instead — otherwise one client exhausts the bucket for everyone.
+        const quotaKey =
+          auth.keyId === "anonymous"
+            ? `ip:${req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "unknown"}`
+            : auth.keyId;
+        const quota = limiter.take(quotaKey);
         if (!quota.allowed) {
           res.setHeader("Retry-After", String(quota.retryAfterSeconds));
           sendJson(res, 429, {

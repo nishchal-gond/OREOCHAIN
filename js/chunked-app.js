@@ -9,10 +9,16 @@
  * inline onclick/onchange attributes the pages use.
  */
 
-import { fromUtf8, to0x, utf8 } from "./core/bytes.js";
+import { to0x, utf8 } from "./core/bytes.js";
 import { DEFAULT_CHUNK_SIZE } from "./core/chunker.js";
 import { DEFAULT_PBKDF2_ITERATIONS } from "./core/crypto.js";
-import { openManifest, packFile, restoreFile, sealManifest } from "./core/manifest.js";
+import {
+  openManifest,
+  packFile,
+  readManifest,
+  restoreFile,
+  sealManifest,
+} from "./core/manifest.js";
 import { DEFAULT_SUITE, listSuites } from "./core/suites.js";
 import { createAdapterFromConfig, putAll } from "./storage/ipfs.js";
 import { CHUNKED_VERIFICATION_ABI } from "./contract-abi.js";
@@ -325,7 +331,9 @@ export async function retrieveChunked() {
 
     say("Fetching manifest…");
     const manifestBytes = await adapter.get(onChain.manifestCID);
-    const manifest = JSON.parse(fromUtf8(manifestBytes));
+    // readManifest validates before anything trusts a field. The manifest came
+    // from storage, so whoever can serve that CID wrote every value in it.
+    const manifest = readManifest(manifestBytes);
 
     if (manifest.merkleRoot.toLowerCase() !== onChain.merkleRoot) {
       throw new Error(

@@ -384,6 +384,30 @@ test("a disallowed origin gets no CORS grant", async () => {
   }
 });
 
+test("anonymous callers are rate limited by source address, not as one pool", async () => {
+  const gw = await startGateway({
+    OREOCHAIN_API_KEYS: "",
+    OREOCHAIN_ALLOW_ANONYMOUS: "true",
+    OREOCHAIN_RATE_LIMIT_PER_MINUTE: "60",
+    OREOCHAIN_RATE_LIMIT_BURST: "2",
+  });
+  try {
+    const statuses = [];
+    for (let i = 0; i < 4; i++) {
+      const response = await fetch(`${gw.url}/api/storage/pin`, {
+        method: "POST",
+        body: randomBytes(32),
+      });
+      statuses.push(response.status);
+    }
+    // All four come from the same loopback address, so the burst still applies.
+    assert.deepEqual(statuses.slice(0, 2), [200, 200]);
+    assert.ok(statuses.includes(429), `never rate limited: ${statuses.join(",")}`);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test("an unknown endpoint is a 404", async () => {
   const gw = await startGateway();
   try {

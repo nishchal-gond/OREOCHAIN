@@ -125,6 +125,9 @@ removes cross-origin requests entirely, which is the simplest deployment.
    (never the key), byte counts and CIDs.
 5. Rate limits are per process and in memory. Behind multiple instances each
    enforces its own share; move to a shared store if you need a global limit.
+   Authenticated callers are bucketed by key, anonymous ones by source address
+   — which behind a reverse proxy is the proxy's address, so every anonymous
+   caller shares one bucket unless the proxy enforces its own limits.
 6. `SIGTERM` drains in-flight requests before exiting, so a deploy does not
    drop an upload mid-chunk.
 
