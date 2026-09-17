@@ -54,18 +54,18 @@
               <a class="nav-link active" aria-current="page" href="index.html">Home</a>
               </li>
               <li class="nav-item">
-              <a class="nav-link " href="upload.html">Upload </a>
+              <a class="nav-link " href="upload.html">Store </a>
               </li>
               <li class="nav-item">
+              <a class="nav-link" href="retrieve.html">Retrieve </a>
+            </li>
+            <li class="nav-item">
               <a class="nav-link" href="delete.html">Delete </a>
               </li>
 
               <li class="nav-item">
                 <a class="nav-link" href="admin.html">Admin</a>
-                </li>            
-                  <li class="nav-item">
-              <a class="nav-link " href="about.html">Team</a>
-              </li>
+                </li>
           </ul>
           </div>
         </div>
@@ -73,19 +73,25 @@
 
     <!-- Home -->
     <section class="home py-5 d-flex align-items-center" id="header">
-<video autoplay muted loop id="myVideo">
-  <source src="./files/earth.mp4" type="video/mp4">
-</video>
-      <div class="container  text text-light py-5" data-aos="fade-right">
+      <div class="container text text-light py-5" data-aos="fade-right">
+        <p class="eyebrow">Verifiable storage infrastructure</p>
         <h1 class="headline text">
-          Build <span class="text-info">trust</span>  <br>
-          into your Organization
+          Documents that can<br />
+          <span class="text-info">prove themselves</span>
         </h1>
-        <p class="para  py-3">
-          The OrioChain platform is a leading Document Verification platform <br> 
-          designed to bring efficiency and security to your operations.
+        <p class="para py-3">
+          Files are split into chunks and encrypted in your browser before
+          anything is uploaded. A single cryptographic root is anchored in a
+          public ledger — so any chunk can be proven authentic later, without
+          revealing the rest of the document.
         </p>
-
+        <div class="hero-actions">
+          <a href="upload.html" class="btn main-button">Store a document</a>
+          <a href="verify.html" class="btn ghost-button">Verify one</a>
+        </div>
+        <p class="hero-note">
+          No wallet. No gas fees. No plaintext ever leaves your device.
+        </p>
       </div>
       <!-- end of container -->
     </section>
@@ -96,25 +102,33 @@
       <div class="container-fluid">
         <div class="row text-light">
           <div class="col-lg-4 text-center p-5" data-aos="zoom-in">
-            <img src="files/undraw_investment_data_re_sh9x.svg" width="150">   
-            <h4 class="py-3">Less Cost</h4>
+            <img src="files/securefiles.svg" width="150" alt="" />
+            <h4 class="py-3">Encrypted before it leaves you</h4>
             <p class="para-light">
-              with OrioChain uploading any document cost only <span class="text-warning"> 0.01 &dollar; 😮</span>
-              so you can upload without caring about the Operation cost
+              Every chunk is sealed with its own key in your browser. The
+              storage provider, the network and this platform hold
+              <span class="text-warning">ciphertext only</span> — a full breach
+              of our servers exposes no documents.
             </p>
           </div>
           <div class="col-lg-4 text-center p-5" data-aos="zoom-in">
-            <img src="files/undraw_time_management_re_tk5w.svg" width="150">   
-            <h4 class="py-3">Fast Process</h4>
+            <img src="files/undraw_investment_data_re_sh9x.svg" width="150" alt="" />
+            <h4 class="py-3">No wallet, no gas</h4>
             <p class="para-light">
-              Verfying Cirtificates  takes just <span class="text-warning"> 1 Second 😳 </span>
+              You get a signed receipt the moment your file is stored. Thousands
+              of documents are then anchored together in
+              <span class="text-warning">one transaction</span>, so per-document
+              cost falls as the platform grows.
             </p>
           </div>
           <div class="col-lg-4 text-center p-5" data-aos="zoom-in">
-            <img src="files/securefiles.svg" width="150">   
-            <h4 class="py-3">Secure</h4>
+            <img src="files/undraw_time_management_re_tk5w.svg" width="150" alt="" />
+            <h4 class="py-3">Prove one page, not the file</h4>
             <p class="para-light">
-              100% Secure & Transparent all operations With Blockchain Technology 🔒
+              A Merkle commitment covers every chunk, so a
+              <span class="text-warning">single 256 KB block</span> can be
+              proven authentic on its own — disclose one section of a contract
+              and keep the rest sealed.
             </p>
           </div>
         </div>
@@ -128,26 +142,31 @@
       <div class="container">
         <div class="row d-flex align-items-center">
           <div class="col-lg-7" data-aos="fade-right">
-            <p  class="main-header-section">ABOUT US</p>
+            <p class="main-header-section">HOW IT WORKS</p>
             <h1>
-              WE ARE TOP <br />
-              
+              Three layers of proof
             </h1>
             <p class="py-2 para-light">
-              Lorem ipsum dolor sit amet consectetur adipisicing elit. Non sed
-              accusantium aut dolores inventore architecto modi cupiditate
-              eligendi corporis, illum illo culpa. Reiciendis, molestias. Illum
-              voluptatum quisquam ad veritatis dolorem.
+              <strong>In your browser.</strong> A file is split into 256&nbsp;KB
+              chunks. Each chunk is sealed with its own key, derived so that no
+              two chunks ever share one, and bound to its position — so a chunk
+              cannot be reordered, duplicated or swapped in from another file
+              without decryption failing outright.
             </p>
             <p class="py-2 para-light">
-              Lorem ipsum dolor sit amet consectetur adipisicing elit. Non sed
-              accusantium aut dolores inventore architecto modi cupiditate
-              eligendi corporis, illum illo culpa. Reiciendis, molestias. Illum
-              voluptatum quisquam ad veritatis dolorem.
+              <strong>In storage.</strong> Only ciphertext is uploaded, and each
+              chunk is addressed and fetched independently. The storage provider
+              learns how large a file is and when it arrived. Nothing more.
+            </p>
+            <p class="py-2 para-light">
+              <strong>On the ledger.</strong> A Merkle root committing to every
+              chunk is anchored publicly. Any single chunk can later be proven
+              to belong to the registered document — without downloading,
+              decrypting or disclosing the rest of it.
             </p>
 
             <div class="my-3">
-              <a class="btn bg-white" href="#your-link">Learn More</a>
+              <a class="btn bg-white" href="upload.html">Store a document</a>
             </div>
           </div>
           <div class="col-lg-5 text-center py-4 py-sm-0" data-aos="fade-down">
@@ -174,63 +193,34 @@
           <div class="col-lg-5 d-flex align-items-center px-4 py-3" data-aos="zoom-in">
             <div class="row">
               <div class="text-center text-lg-start py-4 pt-lg-0">
-                <p class="main-header-section">OUR WORK</p>
-                <h2 class="py-2">Explore unlimited possibilities</h2>
+                <p class="main-header-section">THE NUMBERS</p>
+                <h2 class="py-2">Built to be checked, not believed</h2>
                 <p class="para-light">
-                  Lorem ipsum dolor sit amet consectetur, adipisicing elit.
-                  Dignissimos dicta mollitia totam explicabo obcaecati quia
-                  laudantium repudiandae.
+                  Every figure here is a property of the system you can verify
+                  in the source, not a usage statistic.
                 </p>
               </div>
               <div class="container" data-aos="fade-up">
                 <div class="row g-5">
                   <div class="col-6 text-start">
-                    <i class="fas fa-briefcase fa-2x text-start"></i>
-                    <h2
-                      class="purecounter"
-                      data-purecounter-start="0"
-                      data-purecounter-end="128"
-                      data-purecounter-duration="1"
-                    >
-                      1
-                    </h2>
-                    <p>UNIVERSITIES SERVED</p>
+                    <i class="fas fa-layer-group fa-2x text-start"></i>
+                    <h2>256 KB</h2>
+                    <p>PER INDEPENDENTLY PROVABLE CHUNK</p>
                   </div>
                   <div class="col-6">
-                    <i class="fas fa-award fa-2x"></i>
-                    <h2
-                      class="purecounter"
-                      data-purecounter-start="0"
-                      data-purecounter-end="2917"
-                      data-purecounter-duration="1"
-                    >
-                      1
-                    </h2>
-                    <p>VERIFIED CIRTIFACATES</p>
+                    <i class="fas fa-key fa-2x"></i>
+                    <h2>1 : 1</h2>
+                    <p>ENCRYPTION KEYS PER CHUNK &mdash; NEVER REUSED</p>
                   </div>
                   <div class="col-6">
-                    <i class="fas fa-users fa-2x"></i>
-                    <h2
-                      class="purecounter"
-                      data-purecounter-start="0"
-                      data-purecounter-end="1255"
-                      data-purecounter-duration="1"
-                    >
-                      1
-                    </h2>
-                    <p>ACTIVE EXPORTERS</p>
+                    <i class="fas fa-coins fa-2x"></i>
+                    <h2>0</h2>
+                    <p>WALLETS OR GAS FEES REQUIRED FROM USERS</p>
                   </div>
                   <div class="col-6">
-                    <i class="fas fa-clock fa-2x"></i>
-                    <h2
-                      class="purecounter"
-                      data-purecounter-start="0"
-                      data-purecounter-end="1157"
-                      data-purecounter-duration="1"
-                    >
-                      1
-                    </h2>
-                    <p>GOOD REVIEWS</p>
+                    <i class="fas fa-vial fa-2x"></i>
+                    <h2>200</h2>
+                    <p>AUTOMATED TESTS, INCLUDING ADVERSARIAL ONES</p>
                   </div>
                 </div>
               </div>
@@ -246,22 +236,45 @@
     </section>
     <!-- end of work -->
 
-    <!-- Samples -->
-<section class="samples text-light">
-  <div class="container py-3"> 
-    <h4  data-aos="fade-right" class="main-header-section" >Samples</h4>
-    <h2 data-aos="fade-right" class="p-3">Scan Sample Cards to Test Our System</h2>
-    <div class="row gy-4 ">
-      <div data-aos="zoom-in" class="col-md-6 ">
-        <img class="sample" src="files/Ali Falah Orio.svg" alt="">
+    <!-- Anchoring -->
+    <section class="samples text-light">
+      <div class="container py-5">
+        <h4 data-aos="fade-right" class="main-header-section">ANCHORING</h4>
+        <h2 data-aos="fade-right" class="p-3">
+          One transaction, thousands of documents
+        </h2>
+        <div class="row gy-4 align-items-center">
+          <div class="col-lg-7" data-aos="fade-right">
+            <p class="para-light">
+              Registering documents one at a time means one transaction each —
+              a cost that grows with every upload, and a wallet every user has
+              to own. Neither scales to a platform.
+            </p>
+            <p class="para-light">
+              Instead, you receive a signed receipt the instant your file is
+              stored. Documents are then collected and committed together
+              through a single Merkle root, published in one transaction.
+              Each document keeps its own independent inclusion proof, a few
+              hundred bytes regardless of how many it was batched with.
+            </p>
+            <p class="para-light">
+              A batch of ten thousand costs what a batch of one costs. The
+              price per document falls as the platform grows, rather than
+              rising with it.
+            </p>
+          </div>
+          <div class="col-lg-5 text-center" data-aos="zoom-in">
+            <img
+              class="img-fluid"
+              src="files/undraw_investment_data_re_sh9x.svg"
+              width="300"
+              alt=""
+            />
+          </div>
+        </div>
       </div>
-      <div data-aos="zoom-in" class="col-md-6 ">
-        <img class="sample" src="files/Ali Hussein Orio.svg" alt="">
-      </div>
-    </div>
-  </div>
-</section>
-    <!-- end of Samples -->
+    </section>
+    <!-- end of Anchoring -->
 
 <!-- Footer -->
     <footer class="footer-dark">
@@ -278,8 +291,8 @@
           <div class="col-sm-6 col-md-3 item">
             <h3   data-aos="fade-right">About us</h3>
             <ul  data-aos="zoom-in">
-              <li><a href="about.html">Company</a></li>
-              <li><a href="about.html">Team</a></li>
+              <li><a href="upload.html">Store a document</a></li>
+              <li><a href="verify.html">Verify a document</a></li>
             </ul>
           </div>
           <div class="col-md-6 item text">
@@ -335,9 +348,11 @@
     <div >
       <i onclick="topFunction()" id="scroll-btn" class="fa-solid fa-angle-up"></i>
     </div>
-    <div><a href="mailto:ugond07@gmail.com?subject=From OrioChain Site"> 
-      <i class="mail-us fa-solid fa-headset"></i>
-    </a>
+    <div>
+      <a href="mailto:ugond07@gmail.com?subject=From OrioChain Site">
+        <i class="mail-us fa-solid fa-headset"></i>
+      </a>
+    </div>
     <script
     src="https://code.jquery.com/jquery-3.6.0.js"
     integrity="sha256-H+K7U5CnXl1h5ywQfKtSj8PCmoN9aaq30gDh27Xc0jk="

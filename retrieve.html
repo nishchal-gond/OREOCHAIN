@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="./css/loader.css" />
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link href="./css/aos.min.css" rel="stylesheet" />
+    <script src="./js/aos.js"></script>
+    <script src="./node_modules/web3/dist/web3.min.js"></script>
+    <script src="./js/config.js"></script>
+    <script type="module" src="js/App.js"></script>
+    <script type="module" src="./js/chunked-app.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css"
+      integrity="sha512-KfkfwYDsLkIlwQp6LFnl8zNdLGxu9YAA1QvwINks4PhcElQSvqcyVLLD9aMhXd13uQjoXtEKNosOWaZqXgel0g=="
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    />
+    <link rel="stylesheet" href="css/main.css" />
+    <link rel="icon" href="./assets/images/icon.png" />
+    <title>Retrieve Document</title>
+  </head>
+  <body>
+    <!-- loading Circular dots... -->
+    <div class="loader-wraper">
+      <div class="lds-roller">
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+      </div>
+    </div>
+
+    <!-- navigation bar -->
+    <nav class="navbar navbar-expand-lg bg-light py-3 navbar-dark">
+      <div class="container">
+        <a class="navbar-brand" href="index.html">
+          <i class="fa-solid fa-dragon home_text"></i>
+          <span class="home_text">Orio</span>
+          Chain
+        </a>
+        <button
+          class="navbar-toggler"
+          type="button"
+          data-bs-toggle="collapse"
+          data-bs-target="#navbarSupportedContent"
+          aria-controls="navbarSupportedContent"
+          aria-expanded="false"
+          aria-label="Toggle navigation"
+        >
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarSupportedContent">
+          <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+            <li class="nav-item">
+              <a class="nav-link" aria-current="page" href="index.html">Home</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="upload.html">Upload</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link active" href="retrieve.html">Retrieve</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="delete.html">Delete</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="admin.html">Admin</a>
+            </li>
+          </ul>
+          <div class="d-flex">
+            <button id="loginButton" onclick="connect()" class="btn main-button">
+              Login
+            </button>
+            <button id="logoutButton" onclick="disconnect()" class="btn main-button">
+              Logout
+            </button>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <div class="container">
+      <div class="alert alert-danger d-none mt-2">
+        Please download MetaMask at
+        <a target="_blank" href="https://metamask.io/download">Metamask Site</a>
+      </div>
+
+      <!-- retrieval form -->
+      <div data-aos="zoom-in" class="col p-3 data-upload my-3 mx-md-2">
+        <h4 class="text-center mb-3">Retrieve a chunked document</h4>
+        <p class="text-center text-muted">
+          Every chunk is fetched, hash-checked, authenticated and replayed against the
+          Merkle root stored on-chain before the file is rebuilt in your browser.
+        </p>
+
+        <label class="form-label mt-3" for="lookup-hash">Document hash</label>
+        <input
+          id="lookup-hash"
+          class="form-control"
+          type="text"
+          placeholder="0x…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+
+        <p class="text-muted mt-2 mb-1">
+          Don't have the hash? Select the file and it will be computed locally.
+        </p>
+        <input onchange="hashSelectedFile()" id="doc-file" type="file" />
+
+        <label class="form-label mt-3" for="retrieve-passphrase">
+          Passphrase <span class="text-muted">(only for encrypted documents)</span>
+        </label>
+        <input
+          id="retrieve-passphrase"
+          class="form-control"
+          type="password"
+          autocomplete="off"
+          placeholder="Leave blank for public documents"
+        />
+
+        <span id="note" class="text-danger d-block my-2"></span>
+        <img id="loader" class="d-none" src="files/loader.svg" alt="loader" />
+
+        <div id="chunk-progress" class="progress my-3 d-none" style="height: 22px">
+          <div
+            id="chunk-progress-bar"
+            class="progress-bar progress-bar-striped progress-bar-animated"
+            role="progressbar"
+            style="width: 0%"
+          ></div>
+        </div>
+
+        <button
+          onclick="retrieveChunked()"
+          class="btn mt-3 upload-button d-block main-button"
+          type="button"
+          id="chunked-retrieve-button"
+        >
+          Retrieve &amp; verify
+        </button>
+      </div>
+
+      <!-- Verification result -->
+      <div class="box d-none my-3 row gx-0 mx-md-2 transaction-status col-lg">
+        <div class="left col-lg-12 p-3 d-flex flex-column">
+          <span class="p-2 info text-center" id="doc-status"></span>
+          <span class="p-2 info text-break" id="file-hash"></span>
+          <span class="p-2 info text-break" id="merkle-root"></span>
+          <span class="p-2 info text-break" id="manifest-cid"></span>
+          <span class="p-2 info" id="chunk-summary"></span>
+          <span class="p-2 info" id="time-stamps"></span>
+          <span class="p-2 info" id="blockNumber"></span>
+          <span class="p-2 info" id="college-name"></span>
+          <span class="p-2 info text-break" id="exporter-address"></span>
+
+          <span class="d-flex justify-content-center mt-3">
+            <a href="#" id="download-document" class="download-link d-none"></a>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <i onclick="topFunction()" id="scroll-btn" class="fa-solid fa-angle-up"></i>
+    <script src="./js/script.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

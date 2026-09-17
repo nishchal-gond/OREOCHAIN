@@ -1,0 +1,195 @@
+/**
+ * Batch anchoring — proving many documents with one transaction.
+ *
+ * THE PROBLEM
+ *
+ * Registering each document on-chain costs one transaction. For a platform
+ * that is fatal twice over:
+ *
+ *   1. Cost scales linearly with usage. Ten thousand uploads is ten thousand
+ *      transactions, and the operator (or the user) pays for every one.
+ *   2. Worse, it forces a wallet on every user. A person uploading a degree
+ *      certificate does not have MetaMask, does not hold MATIC, and will not
+ *      install a browser extension and buy cryptocurrency to file a document.
+ *      That is not a fee problem, it is an adoption wall.
+ *
+ * THE FIX
+ *
+ * The same Merkle construction that proves a chunk belongs to a file proves a
+ * file belongs to a batch. Collect every document registered during a window,
+ * build a tree over them, and publish one root:
+ *
+ *      doc₁  doc₂  doc₃  …  doc₁₀₀₀₀      ← each an (already computed) leaf
+ *        └──┬──┘     └──┬──┘
+ *           └────┬──────┘
+ *             batch root                   ← ONE transaction
+ *
+ * Every document still gets an independent, verifiable on-chain proof: its
+ * inclusion path to the batch root. Ten thousand documents share the gas of a
+ * single transaction, so per-document cost falls by four orders of magnitude
+ * and keeps falling as volume grows — the opposite of the usual scaling curve.
+ *
+ * Combined with signed receipts (js/core/receipt.js), the user experience has
+ * no wallet and no gas in it at all: they upload, they get a signed receipt
+ * immediately, and the anchoring happens behind them on the operator's
+ * schedule. The chain becomes a periodic public checkpoint rather than a
+ * toll booth in front of every action.
+ */
+
+import { concat, fromHex, to0x, utf8 } from "./bytes.js";
+import { leafHash, merkleProof, merkleRoot, verifyMerkleProof } from "./chunker.js";
+
+export const ANCHOR_VERSION = "oreochain-anchor-v1";
+
+/** Batches this large already amortise gas to near nothing; beyond it, proofs grow. */
+export const MAX_BATCH_SIZE = 65536;
+
+/**
+ * Canonical bytes committing to one document.
+ *
+ * Field order and widths are fixed because the Solidity side recomputes this
+ * preimage byte-for-byte. `fileSize` is a big-endian uint64, matching
+ * abi.encodePacked, so the two implementations cannot drift.
+ */
+export function documentPreimage({ fileHash, merkleRoot: root, fileSize, manifestCID }) {
+  if (!/^0x[0-9a-f]{64}$/.test(fileHash)) throw new Error("fileHash must be 0x-prefixed 32-byte hex");
+  if (!/^0x[0-9a-f]{64}$/.test(root)) throw new Error("merkleRoot must be 0x-prefixed 32-byte hex");
+  if (!Number.isInteger(fileSize) || fileSize < 0) throw new Error("fileSize must be a non-negative integer");
+  if (typeof manifestCID !== "string" || manifestCID.length === 0) {
+    throw new Error("manifestCID must be a non-empty string");
+  }
+
+  const size = new Uint8Array(8);
+  new DataView(size.buffer).setBigUint64(0, BigInt(fileSize), false); // big-endian
+
+  return concat(fromHex(fileHash), fromHex(root), size, utf8(manifestCID));
+}
+
+/** The batch-tree leaf for one document. */
+export function documentLeaf(document) {
+  return leafHash(documentPreimage(document));
+}
+
+/**
+ * Build a batch from registered documents.
+ *
+ * @param {Array<{fileHash:string, merkleRoot:string, fileSize:number, manifestCID:string}>} documents
+ * @returns {Promise<{root:string, size:number, leaves:Uint8Array[], documents:Array}>}
+ */
+export async function buildBatch(documents) {
+  if (!Array.isArray(documents) || documents.length === 0) {
+    throw new Error("a batch needs at least one document");
+  }
+  if (documents.length > MAX_BATCH_SIZE) {
+    throw new Error(`a batch holds at most ${MAX_BATCH_SIZE} documents, got ${documents.length}`);
+  }
+
+  const seen = new Set();
+  const leaves = [];
+  for (const document of documents) {
+    if (seen.has(document.fileHash)) {
+      throw new Error(`document ${document.fileHash} appears twice in the batch`);
+    }
+    seen.add(document.fileHash);
+    leaves.push(await documentLeaf(document));
+  }
+
+  return {
+    version: ANCHOR_VERSION,
+    root: to0x(await merkleRoot(leaves)),
+    size: documents.length,
+    leaves,
+    documents,
+  };
+}
+
+/**
+ * The proof that one document is in a batch.
+ *
+ * Handed to the user at upload time, it is all they need — together with the
+ * batch root read from the chain — to prove their document was anchored. The
+ * proof is a few hundred bytes regardless of batch size: a 65,536-document
+ * batch needs 16 sibling hashes.
+ */
+export async function proveInBatch(batch, fileHash) {
+  const index = batch.documents.findIndex((document) => document.fileHash === fileHash);
+  if (index === -1) throw new Error(`document ${fileHash} is not in this batch`);
+
+  const proof = await merkleProof(batch.leaves, index);
+
+  return {
+    version: ANCHOR_VERSION,
+    fileHash,
+    batchRoot: batch.root,
+    index,
+    document: batch.documents[index],
+    proof: proof.map((step) => ({ hash: to0x(step.hash), side: step.side })),
+  };
+}
+
+/**
+ * Verify an inclusion proof against a batch root read from the chain.
+ *
+ * Recomputes the leaf from the document's own fields rather than trusting a
+ * supplied leaf — otherwise a proof could be valid for a leaf that has nothing
+ * to do with the document it claims to describe.
+ */
+export async function verifyInBatch(inclusion, onChainBatchRoot) {
+  const expectedRoot = (onChainBatchRoot || inclusion.batchRoot).toLowerCase();
+
+  const leaf = await documentLeaf(inclusion.document);
+
+  const ok = await verifyMerkleProof(
+    leaf,
+    inclusion.proof.map((step) => ({ hash: fromHex(step.hash), side: step.side })),
+    fromHex(expectedRoot)
+  );
+
+  if (!ok) return { valid: false, reason: "inclusion proof does not reach the batch root" };
+  if (inclusion.document.fileHash !== inclusion.fileHash) {
+    return { valid: false, reason: "proof names a different document than it carries" };
+  }
+  return { valid: true, fileHash: inclusion.fileHash, batchRoot: expectedRoot };
+}
+
+/**
+ * Accumulates documents until it is worth anchoring.
+ *
+ * The operator decides the trade-off between cost and latency: a large batch
+ * is cheaper per document, a short interval means a document is anchored
+ * sooner. Nothing is lost while waiting — the signed receipt already proves
+ * the service accepted the document, and the anchor upgrades that to a public,
+ * independently checkable fact.
+ */
+export function createBatchQueue({ maxSize = 1000, maxAgeMs = 3600000, now = () => Date.now() } = {}) {
+  let pending = [];
+  let oldest = null;
+
+  return {
+    add(document) {
+      if (pending.length >= MAX_BATCH_SIZE) throw new Error("batch queue is full");
+      if (pending.some((entry) => entry.fileHash === document.fileHash)) return { queued: false, reason: "duplicate" };
+
+      pending.push(document);
+      if (oldest === null) oldest = now();
+      return { queued: true, pending: pending.length };
+    },
+
+    /** True once the batch is large enough, or the oldest entry has waited long enough. */
+    shouldFlush() {
+      if (pending.length === 0) return false;
+      return pending.length >= maxSize || now() - oldest >= maxAgeMs;
+    },
+
+    /** Take everything pending and reset. The caller anchors what it receives. */
+    drain() {
+      const taken = pending;
+      pending = [];
+      oldest = null;
+      return taken;
+    },
+
+    size: () => pending.length,
+    peek: () => [...pending],
+  };
+}

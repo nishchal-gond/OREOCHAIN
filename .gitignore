@@ -26,3 +26,6 @@ typechain-types/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local configuration (contains endpoints and, in dev, tokens)
+js/config.js
