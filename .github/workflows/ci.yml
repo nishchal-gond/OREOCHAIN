@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+# A new push supersedes an in-flight run on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 is the floor declared in package.json; 22 is what development uses.
+        node: ["18", "20", "22"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  verify-abi:
+    name: Contract ABI is current
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # js/contract-abi.js is generated. If it drifts from the .sol source, the
+      # frontend silently calls a contract shape that no longer exists.
+      - name: Regenerate and diff
+        run: |
+          npm run abi
+          if ! git diff --quiet -- js/contract-abi.js; then
+            echo "::error::js/contract-abi.js is out of date. Run 'npm run abi' and commit the result."
+            git diff -- js/contract-abi.js
+            exit 1
+          fi
+
+  no-secrets:
+    name: No credentials in source
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # This repository shipped a live Pinata key in client-side JS once.
+      # Fail the build rather than let it happen again.
+      - name: Scan for committed credentials
+        run: |
+          patterns='pinata_secret_api_key|PINATA_SECRET|["'"'"']eyJhbGciOi[A-Za-z0-9._-]{40,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+          if grep -rInE "$patterns" \
+               --exclude-dir=node_modules --exclude-dir=.git \
+               --exclude=package-lock.json --exclude=ci.yml .; then
+            echo "::error::Possible credential committed to the repository."
+            exit 1
+          fi
+          echo "No credentials found in tracked source."
+
+      - name: js/config.js must stay untracked
+        run: |
+          if git ls-files --error-unmatch js/config.js 2>/dev/null; then
+            echo "::error::js/config.js is tracked. It holds deployment settings and must stay gitignored."
+            exit 1
+          fi
+          echo "js/config.js is not tracked."

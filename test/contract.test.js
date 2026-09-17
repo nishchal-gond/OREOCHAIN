@@ -14,8 +14,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-import { randomBytes, to0x, toHex } from "../js/core/bytes.js";
+import { randomBytes, to0x, toHex, utf8 } from "../js/core/bytes.js";
 import { hashChunks, leafHash, merkleProof, merkleRoot } from "../js/core/chunker.js";
+import { buildBatch, documentLeaf, proveInBatch } from "../js/core/anchor.js";
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -165,6 +166,106 @@ test("Solidity computeRoot rebuilds the JavaScript Merkle root", { skip }, async
         "0x" + toHex(onChain),
         expected,
         `root disagreed proving chunk ${i} of ${count}`
+      );
+    }
+  }
+});
+
+test("Solidity documentLeaf matches the JavaScript batch leaf", { skip }, async () => {
+  const { call, selector, word } = await deployed();
+
+  // A dynamic string argument sits after the fixed-size head, so the offset
+  // accounts for fileHash, merkleRoot and fileSize.
+  async function solDocumentLeaf(document) {
+    const cid = utf8(document.manifestCID);
+    const padded = new Uint8Array(Math.ceil(cid.length / 32) * 32);
+    padded.set(cid);
+
+    return call(
+      concat(
+        selector("documentLeaf(bytes32,bytes32,uint64,string)"),
+        hexWord(document.fileHash),
+        hexWord(document.merkleRoot),
+        word(document.fileSize),
+        word(4 * 32), // offset to the string data
+        word(cid.length),
+        padded
+      )
+    );
+  }
+
+  function hexWord(hex) {
+    const out = new Uint8Array(32);
+    const bytes = hex.slice(2).match(/../g).map((b) => parseInt(b, 16));
+    out.set(bytes, 32 - bytes.length);
+    return out;
+  }
+
+  const cases = [
+    { fileHash: "0x" + "11".repeat(32), merkleRoot: "0x" + "22".repeat(32), fileSize: 0, manifestCID: "a" },
+    { fileHash: "0x" + "ab".repeat(32), merkleRoot: "0x" + "cd".repeat(32), fileSize: 1, manifestCID: "bafyShort" },
+    {
+      fileHash: to0x(randomBytes(32)),
+      merkleRoot: to0x(randomBytes(32)),
+      fileSize: 4294967296, // beyond uint32, exercising the big-endian uint64
+      manifestCID: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+    },
+    {
+      fileHash: to0x(randomBytes(32)),
+      merkleRoot: to0x(randomBytes(32)),
+      fileSize: 1099511627775,
+      manifestCID: "x".repeat(70), // spans more than two 32-byte words
+    },
+  ];
+
+  for (const document of cases) {
+    assert.equal(
+      "0x" + toHex(await solDocumentLeaf(document)),
+      to0x(await documentLeaf(document)),
+      `batch leaf disagreed for manifestCID of length ${document.manifestCID.length}`
+    );
+  }
+});
+
+test("Solidity rebuilds batch roots from JavaScript inclusion proofs", { skip }, async () => {
+  const { call, selector, word } = await deployed();
+
+  for (const count of [1, 2, 3, 5, 9, 16]) {
+    const documents = Array.from({ length: count }, (_, i) => ({
+      fileHash: "0x" + i.toString(16).padStart(64, "0"),
+      merkleRoot: to0x(randomBytes(32)),
+      fileSize: 1000 + i,
+      manifestCID: `bafyBatchDoc${i}`,
+    }));
+
+    const batch = await buildBatch(documents);
+
+    for (const document of documents) {
+      const inclusion = await proveInBatch(batch, document.fileHash);
+      const leaf = await documentLeaf(document);
+      const proof = inclusion.proof;
+
+      const onChain = await call(
+        concat(
+          selector("computeRoot(bytes32,bytes32[],bool[])"),
+          leaf,
+          word(96),
+          word(96 + 32 + proof.length * 32),
+          word(proof.length),
+          ...proof.map((step) => {
+            const out = new Uint8Array(32);
+            out.set(step.hash.slice(2).match(/../g).map((b) => parseInt(b, 16)));
+            return out;
+          }),
+          word(proof.length),
+          ...proof.map((step) => word(step.side === "right" ? 1 : 0))
+        )
+      );
+
+      assert.equal(
+        "0x" + toHex(onChain),
+        batch.root,
+        `batch root disagreed proving document ${document.fileHash} of ${count}`
       );
     }
   }

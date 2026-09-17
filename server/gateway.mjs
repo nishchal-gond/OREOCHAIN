@@ -27,6 +27,17 @@ import { authenticate } from "./auth.mjs";
 import { createRateLimiter } from "./ratelimit.mjs";
 
 const CID_ROUTE = /^\/api\/storage\/([A-Za-z0-9_-]{1,512})$/;
+const INCLUSION_ROUTE = /^\/api\/proofs\/inclusion\/(0x[0-9a-fA-F]{64})$/;
+
+/**
+ * Endpoints that must work without a key. Verifying someone else's document is
+ * a public act — a court, an employer or a regulator checking a certificate has
+ * no account here and should not need one.
+ */
+const PUBLIC_API = new Set(["/api/proofs/key"]);
+
+/** JSON bodies are metadata, not payloads, so they get a much tighter cap. */
+const MAX_JSON_BYTES = 64 * 1024;
 
 const STATIC_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -155,6 +166,22 @@ function readBody(req, { maxBytes, timeoutMs }) {
   });
 }
 
+async function readJson(req, { timeoutMs }) {
+  const raw = await readBody(req, { maxBytes: MAX_JSON_BYTES, timeoutMs });
+  if (raw.length === 0) {
+    throw Object.assign(new Error("empty body"), { status: 400 });
+  }
+  try {
+    const parsed = JSON.parse(raw.toString("utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("expected a JSON object");
+    }
+    return parsed;
+  } catch (error) {
+    throw Object.assign(new Error(`invalid JSON body: ${error.message}`), { status: 400 });
+  }
+}
+
 function chunkName(req) {
   const raw = req.headers["x-chunk-name"];
   if (typeof raw !== "string") return "chunk";
@@ -204,6 +231,7 @@ async function serveStatic(req, res, root) {
  * @param {object} [deps] injectable for testing
  */
 export function createHandler(config, backend, deps = {}) {
+  const proofs = deps.proofs || null;
   const limiter =
     deps.limiter ||
     createRateLimiter({ perMinute: config.rateLimitPerMinute, burst: config.rateLimitBurst });
@@ -244,6 +272,30 @@ export function createHandler(config, backend, deps = {}) {
       }
 
       const isApi = url.pathname.startsWith("/api/");
+
+      // Public proof endpoints, before the auth gate.
+      if (proofs && req.method === "GET") {
+        if (PUBLIC_API.has(url.pathname)) {
+          sendJson(res, 200, {
+            kid: proofs.kid,
+            publicJwk: proofs.publicJwk,
+            algorithm: "ECDSA-P256-SHA256",
+            ephemeral: proofs.ephemeral,
+          });
+          return;
+        }
+
+        const inclusion = INCLUSION_ROUTE.exec(url.pathname);
+        if (inclusion) {
+          const proof = proofs.proofFor(inclusion[1]);
+          if (!proof) {
+            sendJson(res, 404, { error: "no inclusion proof for that document yet" });
+            return;
+          }
+          sendJson(res, 200, proof);
+          return;
+        }
+      }
 
       if (isApi) {
         if (!corsOk) {
@@ -296,6 +348,40 @@ export function createHandler(config, backend, deps = {}) {
             cid,
             ms: Date.now() - started,
           });
+          return;
+        }
+
+        if (proofs && url.pathname === "/api/proofs/record" && req.method === "POST") {
+          const document = await readJson(req, { timeoutMs: config.readTimeoutMs });
+          let result;
+          try {
+            result = await proofs.record(document);
+          } catch (error) {
+            throw Object.assign(error, { status: error.status || 400 });
+          }
+          sendJson(res, 200, result);
+          log({
+            event: "receipt",
+            keyId: auth.keyId,
+            fileHash: document.fileHash,
+            pending: result.pending,
+          });
+          return;
+        }
+
+        if (proofs && url.pathname === "/api/proofs/status" && req.method === "GET") {
+          sendJson(res, 200, proofs.status());
+          return;
+        }
+
+        if (proofs && url.pathname === "/api/proofs/batch" && req.method === "POST") {
+          const batch = await proofs.buildPendingBatch();
+          if (!batch) {
+            sendJson(res, 200, { batch: null, message: "nothing pending to anchor" });
+            return;
+          }
+          sendJson(res, 200, { batch });
+          log({ event: "batch_built", keyId: auth.keyId, root: batch.root, size: batch.size });
           return;
         }
 

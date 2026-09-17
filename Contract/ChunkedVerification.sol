@@ -47,8 +47,28 @@ contract ChunkedVerification {
     uint256 public exporterCount;
     uint256 public documentCount;
 
+    /**
+     * A batch anchor: one transaction committing to many documents.
+     *
+     * Registering each document individually costs one transaction, which
+     * scales linearly with usage and forces every user to hold a wallet and
+     * gas. Anchoring a Merkle root over N documents costs the same as
+     * anchoring one, so per-document cost falls as volume rises, and users
+     * need no wallet at all — the operator anchors on their behalf.
+     */
+    struct Batch {
+        uint64 blockNumber;
+        uint64 timestamp;
+        uint32 size;       // documents committed to by this root
+        address anchor;    // who submitted it
+        string uri;        // where the batch's inclusion proofs are published
+    }
+
     mapping(bytes32 => Document) private _documents;
     mapping(address => Exporter) private _exporters;
+    mapping(bytes32 => Batch) private _batches;
+
+    uint256 public batchCount;
 
     event ExporterAdded(address indexed exporter, string info);
     event ExporterUpdated(address indexed exporter, string info);
@@ -65,6 +85,12 @@ contract ChunkedVerification {
         bool encrypted
     );
     event DocumentRevoked(address indexed exporter, bytes32 indexed fileHash);
+    event BatchAnchored(
+        address indexed anchor,
+        bytes32 indexed batchRoot,
+        uint32 size,
+        string uri
+    );
 
     error NotOwner();
     error NotPendingOwner();
@@ -247,6 +273,95 @@ contract ChunkedVerification {
 
     function isRegistered(bytes32 fileHash) external view returns (bool) {
         return _documents[fileHash].blockNumber != 0;
+    }
+
+    // ---------------------------------------------------------- batch anchors
+
+    /**
+     * Anchor a batch of documents with one transaction.
+     * @param batchRoot Merkle root over the batch's document leaves.
+     * @param size      how many documents the root commits to.
+     * @param uri       where the inclusion proofs for this batch are published.
+     */
+    function anchorBatch(bytes32 batchRoot, uint32 size, string calldata uri)
+        external
+        onlyExporter
+    {
+        if (batchRoot == bytes32(0)) revert InvalidArgument("batchRoot is zero");
+        if (size == 0) revert InvalidArgument("size is zero");
+        if (_batches[batchRoot].blockNumber != 0) revert AlreadyExists();
+
+        _batches[batchRoot] = Batch({
+            blockNumber: uint64(block.number),
+            timestamp: uint64(block.timestamp),
+            size: size,
+            anchor: msg.sender,
+            uri: uri
+        });
+        unchecked {
+            ++batchCount;
+        }
+
+        emit BatchAnchored(msg.sender, batchRoot, size, uri);
+    }
+
+    function findBatch(bytes32 batchRoot)
+        external
+        view
+        returns (uint64 blockNumber, uint64 timestamp, uint32 size, address anchor, string memory uri)
+    {
+        Batch storage batch = _batches[batchRoot];
+        return (batch.blockNumber, batch.timestamp, batch.size, batch.anchor, batch.uri);
+    }
+
+    /**
+     * Compute a document's batch leaf, matching js/core/anchor.js exactly.
+     *
+     * The preimage is fileHash ‖ merkleRoot ‖ uint64 fileSize ‖ manifestCID,
+     * with fileSize big-endian — which is what abi.encodePacked produces, and
+     * what the JavaScript side writes with DataView.setBigUint64(…, false).
+     */
+    function documentLeaf(
+        bytes32 fileHash,
+        bytes32 merkleRoot,
+        uint64 fileSize,
+        string calldata manifestCID
+    ) public pure returns (bytes32) {
+        return
+            sha256(
+                abi.encodePacked(
+                    bytes1(0x00),
+                    fileHash,
+                    merkleRoot,
+                    fileSize,
+                    bytes(manifestCID)
+                )
+            );
+    }
+
+    /**
+     * Prove a document was included in an anchored batch.
+     *
+     * The leaf is recomputed from the document's own fields rather than
+     * supplied, so a proof cannot be valid for a leaf unrelated to the document
+     * it claims to describe.
+     */
+    function verifyInBatch(
+        bytes32 batchRoot,
+        bytes32 fileHash,
+        bytes32 merkleRoot,
+        uint64 fileSize,
+        string calldata manifestCID,
+        bytes32[] calldata proof,
+        bool[] calldata siblingOnRight
+    ) external view returns (bool) {
+        if (proof.length != siblingOnRight.length) {
+            revert InvalidArgument("proof and sides length mismatch");
+        }
+        if (_batches[batchRoot].blockNumber == 0) revert DoesNotExist();
+
+        bytes32 leaf = documentLeaf(fileHash, merkleRoot, fileSize, manifestCID);
+        return computeRoot(leaf, proof, siblingOnRight) == batchRoot;
     }
 
     // ------------------------------------------------------------ chunk proofs

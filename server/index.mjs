@@ -14,10 +14,11 @@ import { fileURLToPath } from "node:url";
 import { assertSafeConfig, loadConfig } from "./config.mjs";
 import { createBackend } from "./storage.mjs";
 import { createHandler } from "./gateway.mjs";
+import { createProofService, readSigningKey } from "./proofs.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function main() {
+async function main() {
   let config;
   try {
     config = assertSafeConfig(loadConfig());
@@ -27,7 +28,18 @@ function main() {
   }
 
   const backend = createBackend(config);
-  const handler = createHandler(config, backend, { staticRoot: REPO_ROOT });
+
+  const signingKey = readSigningKey();
+  const proofs = await createProofService({ ...signingKey });
+  if (proofs.ephemeral) {
+    console.warn(
+      "[oreochain] WARNING: no OREOCHAIN_RECEIPT_KEY set, so receipts are signed with a " +
+        "throwaway key. Every restart invalidates previously issued receipts. " +
+        "Generate one with: node scripts/generate-receipt-key.mjs"
+    );
+  }
+
+  const handler = createHandler(config, backend, { staticRoot: REPO_ROOT, proofs });
 
   const server = http.createServer((req, res) => {
     handler(req, res).catch((error) => {
@@ -42,7 +54,7 @@ function main() {
   server.listen(config.port, config.host, () => {
     console.log(
       `[oreochain] gateway listening on http://${config.host}:${config.port} ` +
-        `(storage: ${backend.name}, auth: ${config.allowAnonymous ? "anonymous" : `${config.apiKeys.length} key(s)`})`
+        `(storage: ${backend.name}, auth: ${config.allowAnonymous ? "anonymous" : `${config.apiKeys.length} key(s)`}, receipts: ${proofs.kid})`
     );
   });
 
@@ -60,4 +72,7 @@ function main() {
   }
 }
 
-main();
+main().catch((error) => {
+  console.error(`[oreochain] failed to start: ${error.message}`);
+  process.exit(1);
+});

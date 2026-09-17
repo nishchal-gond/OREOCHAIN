@@ -62,6 +62,37 @@ export const CHUNKED_VERIFICATION_ABI = [
       {
         "indexed": true,
         "internalType": "address",
+        "name": "anchor",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "batchRoot",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "size",
+        "type": "uint32"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "uri",
+        "type": "string"
+      }
+    ],
+    "name": "BatchAnchored",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
         "name": "exporter",
         "type": "address"
       },
@@ -242,6 +273,42 @@ export const CHUNKED_VERIFICATION_ABI = [
     "inputs": [
       {
         "internalType": "bytes32",
+        "name": "batchRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "size",
+        "type": "uint32"
+      },
+      {
+        "internalType": "string",
+        "name": "uri",
+        "type": "string"
+      }
+    ],
+    "name": "anchorBatch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "batchCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
         "name": "leaf",
         "type": "bytes32"
       },
@@ -281,6 +348,40 @@ export const CHUNKED_VERIFICATION_ABI = [
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "fileHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint64",
+        "name": "fileSize",
+        "type": "uint64"
+      },
+      {
+        "internalType": "string",
+        "name": "manifestCID",
+        "type": "string"
+      }
+    ],
+    "name": "documentLeaf",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "exporterCount",
     "outputs": [
@@ -288,6 +389,45 @@ export const CHUNKED_VERIFICATION_ABI = [
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "batchRoot",
+        "type": "bytes32"
+      }
+    ],
+    "name": "findBatch",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "blockNumber",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "timestamp",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint32",
+        "name": "size",
+        "type": "uint32"
+      },
+      {
+        "internalType": "address",
+        "name": "anchor",
+        "type": "address"
+      },
+      {
+        "internalType": "string",
+        "name": "uri",
+        "type": "string"
       }
     ],
     "stateMutability": "view",
@@ -578,6 +718,55 @@ export const CHUNKED_VERIFICATION_ABI = [
       }
     ],
     "name": "verifyChunk",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "batchRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "fileHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint64",
+        "name": "fileSize",
+        "type": "uint64"
+      },
+      {
+        "internalType": "string",
+        "name": "manifestCID",
+        "type": "string"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "proof",
+        "type": "bytes32[]"
+      },
+      {
+        "internalType": "bool[]",
+        "name": "siblingOnRight",
+        "type": "bool[]"
+      }
+    ],
+    "name": "verifyInBatch",
     "outputs": [
       {
         "internalType": "bool",

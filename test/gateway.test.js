@@ -16,6 +16,9 @@ import { createRateLimiter } from "../server/ratelimit.mjs";
 
 import { equalBytes, fromUtf8, randomBytes, utf8 } from "../js/core/bytes.js";
 import { createPinataAdapter, putAll } from "../js/storage/ipfs.js";
+import { createProofService, readSigningKey } from "../server/proofs.mjs";
+import { importPublicKey, verifyReceipt } from "../js/core/receipt.js";
+import { verifyInBatch } from "../js/core/anchor.js";
 import { openManifest, packFile, restoreFile, sealManifest } from "../js/core/manifest.js";
 
 const KEY = "k".repeat(48);
@@ -33,7 +36,13 @@ function baseEnv(overrides = {}) {
 async function startGateway(envOverrides = {}, deps = {}) {
   const config = assertSafeConfig(loadConfig(baseEnv(envOverrides)));
   const backend = createMemoryBackend();
-  const handler = createHandler(config, backend, { log: () => {}, sweeper: false, ...deps });
+  const proofs = deps.proofs === false ? null : deps.proofs || (await createProofService());
+  const handler = createHandler(config, backend, {
+    log: () => {},
+    sweeper: false,
+    ...deps,
+    proofs,
+  });
 
   const server = http.createServer((req, res) => {
     handler(req, res).catch(() => {
@@ -47,6 +56,7 @@ async function startGateway(envOverrides = {}, deps = {}) {
   return {
     url: `http://127.0.0.1:${port}`,
     backend,
+    proofs,
     config,
     stop: () => new Promise((resolve) => server.close(resolve)),
   };
@@ -483,4 +493,243 @@ test("a whole document round-trips through the gateway, client-side encrypted", 
   } finally {
     await gw.stop();
   }
+});
+
+// --------------------------------------------------------------- proofs API
+
+test("the receipt verification key is public — verifying needs no account", async () => {
+  // A court or employer checking a certificate has no API key and should not
+  // need one.
+  const gw = await startGateway();
+  try {
+    const response = await fetch(`${gw.url}/api/proofs/key`);
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+    assert.equal(body.algorithm, "ECDSA-P256-SHA256");
+    assert.match(body.kid, /^[A-Za-z0-9]{16}$/);
+    assert.equal(body.publicJwk.crv, "P-256");
+    // A public key must never carry the private component.
+    assert.equal(body.publicJwk.d, undefined);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("recording a document requires authentication", async () => {
+  const gw = await startGateway();
+  try {
+    const response = await fetch(`${gw.url}/api/proofs/record`, {
+      method: "POST",
+      body: JSON.stringify({ fileHash: "0x" + "11".repeat(32) }),
+    });
+    assert.equal(response.status, 401);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a recorded document comes back with a receipt that verifies", async () => {
+  const gw = await startGateway();
+  try {
+    const document = {
+      fileHash: "0x" + "ab".repeat(32),
+      merkleRoot: "0x" + "cd".repeat(32),
+      manifestCID: "bafyReceiptTest",
+      fileSize: 4096,
+      totalChunks: 1,
+      encrypted: true,
+      suite: "aes-256-gcm",
+    };
+
+    const recorded = await fetch(`${gw.url}/api/proofs/record`, {
+      method: "POST",
+      headers: authed({ "Content-Type": "application/json" }),
+      body: JSON.stringify(document),
+    });
+    assert.equal(recorded.status, 200);
+
+    const { receipt, queued } = await recorded.json();
+    assert.equal(queued, true);
+
+    // Verify with only the public key, exactly as an outside party would.
+    const { publicJwk } = await (await fetch(`${gw.url}/api/proofs/key`)).json();
+    const result = await verifyReceipt(receipt, await importPublicKey(publicJwk));
+
+    assert.ok(result.valid, result.reason);
+    assert.equal(result.statement.fileHash, document.fileHash);
+    assert.equal(result.statement.manifestCID, document.manifestCID);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a receipt for a document that was never recorded does not verify", async () => {
+  const gw = await startGateway();
+  try {
+    const { publicJwk } = await (await fetch(`${gw.url}/api/proofs/key`)).json();
+    const publicKey = await importPublicKey(publicJwk);
+
+    const recorded = await fetch(`${gw.url}/api/proofs/record`, {
+      method: "POST",
+      headers: authed({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        fileHash: "0x" + "11".repeat(32),
+        merkleRoot: "0x" + "22".repeat(32),
+        manifestCID: "bafyReal",
+        fileSize: 10,
+        totalChunks: 1,
+      }),
+    });
+    const { receipt } = await recorded.json();
+
+    // Forge a different document into the signed statement.
+    receipt.statement.manifestCID = "bafyForged";
+    assert.equal((await verifyReceipt(receipt, publicKey)).valid, false);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a malformed document is rejected rather than receipted", async () => {
+  const gw = await startGateway();
+  try {
+    for (const body of ['{"fileHash":"0x11"}', "{}", "not json", "[]"]) {
+      const response = await fetch(`${gw.url}/api/proofs/record`, {
+        method: "POST",
+        headers: authed({ "Content-Type": "application/json" }),
+        body,
+      });
+      assert.ok(response.status >= 400, `accepted malformed body: ${body}`);
+    }
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("many documents anchor in one batch, and each still proves independently", async () => {
+  // This is the property that removes per-user gas: 12 documents, 1 anchor.
+  const gw = await startGateway({ OREOCHAIN_RATE_LIMIT_BURST: "200" });
+  try {
+    const documents = Array.from({ length: 12 }, (_, i) => ({
+      fileHash: "0x" + i.toString(16).padStart(64, "0"),
+      merkleRoot: "0x" + (i + 4096).toString(16).padStart(64, "0"),
+      manifestCID: `bafyBatched${i}`,
+      fileSize: 1000 + i,
+      totalChunks: 1,
+      encrypted: true,
+      suite: "aes-256-gcm",
+    }));
+
+    for (const document of documents) {
+      const response = await fetch(`${gw.url}/api/proofs/record`, {
+        method: "POST",
+        headers: authed({ "Content-Type": "application/json" }),
+        body: JSON.stringify(document),
+      });
+      assert.equal(response.status, 200);
+    }
+
+    const status = await (
+      await fetch(`${gw.url}/api/proofs/status`, { headers: authed() })
+    ).json();
+    assert.equal(status.pending, 12);
+
+    const { batch } = await (
+      await fetch(`${gw.url}/api/proofs/batch`, { method: "POST", headers: authed() })
+    ).json();
+    assert.equal(batch.size, 12);
+    assert.match(batch.root, /^0x[0-9a-f]{64}$/);
+
+    // Every document proves against the single anchored root, and inclusion
+    // proofs are public — the verifier sends no credentials.
+    for (const document of documents) {
+      const proofResponse = await fetch(`${gw.url}/api/proofs/inclusion/${document.fileHash}`);
+      assert.equal(proofResponse.status, 200, `no proof for ${document.fileHash}`);
+
+      const inclusion = await proofResponse.json();
+      const verified = await verifyInBatch(inclusion, batch.root);
+      assert.ok(verified.valid, `inclusion proof failed for ${document.fileHash}`);
+    }
+
+    // The queue is drained, so the next batch starts empty.
+    const after = await (
+      await fetch(`${gw.url}/api/proofs/status`, { headers: authed() })
+    ).json();
+    assert.equal(after.pending, 0);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("building a batch with nothing pending is not an error", async () => {
+  const gw = await startGateway();
+  try {
+    const response = await fetch(`${gw.url}/api/proofs/batch`, {
+      method: "POST",
+      headers: authed(),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).batch, null);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("an inclusion proof for an unknown document is a 404", async () => {
+  const gw = await startGateway();
+  try {
+    const response = await fetch(`${gw.url}/api/proofs/inclusion/0x${"99".repeat(32)}`);
+    assert.equal(response.status, 404);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a configured signing key survives a restart; an ephemeral one does not", async () => {
+  const { generateSigningKey } = await import("../js/core/receipt.js");
+  const keys = await generateSigningKey();
+
+  // Two services started from the same configured key — a restart.
+  const before = await createProofService({ ...keys.exported });
+  const after = await createProofService({ ...keys.exported });
+
+  assert.equal(before.ephemeral, false);
+  assert.equal(after.ephemeral, false);
+  assert.equal(before.kid, after.kid, "a configured key must keep its identity across restarts");
+
+  // A receipt issued before the restart still verifies after it.
+  const document = {
+    fileHash: "0x" + "aa".repeat(32),
+    merkleRoot: "0x" + "bb".repeat(32),
+    manifestCID: "bafyAcrossRestart",
+    fileSize: 512,
+    totalChunks: 1,
+  };
+  const { receipt } = await before.record(document);
+  const verified = await verifyReceipt(receipt, await importPublicKey(after.publicJwk));
+  assert.ok(verified.valid, verified.reason);
+
+  // Without a configured key, each start is a new identity and old receipts
+  // become unverifiable — which is why the server warns loudly about it.
+  const ephemeralA = await createProofService();
+  const ephemeralB = await createProofService();
+  assert.equal(ephemeralA.ephemeral, true);
+  assert.notEqual(ephemeralA.kid, ephemeralB.kid);
+
+  const orphaned = await ephemeralA.record(document);
+  const orphanResult = await verifyReceipt(
+    orphaned.receipt,
+    await importPublicKey(ephemeralB.publicJwk)
+  );
+  assert.equal(orphanResult.valid, false);
+});
+
+test("readSigningKey rejects a malformed environment value", () => {
+  assert.throws(() => readSigningKey({ OREOCHAIN_RECEIPT_KEY: "{oops" }), /not valid JSON/);
+  assert.throws(
+    () => readSigningKey({ OREOCHAIN_RECEIPT_KEY: '{"privateJwk":{}}' }),
+    /must be/
+  );
+  assert.deepEqual(readSigningKey({}), { privateJwk: null, publicJwk: null });
 });

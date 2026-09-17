@@ -65,6 +65,7 @@ intend.
 | `OREOCHAIN_READ_TIMEOUT_MS` | `30000` | Request body timeout |
 | `OREOCHAIN_UPSTREAM_TIMEOUT_MS` | `60000` | Timeout for calls to the pinning service |
 | `OREOCHAIN_SERVE_STATIC` | `false` | Also serve the frontend, so there is no CORS at all |
+| `OREOCHAIN_RECEIPT_KEY` | — | Receipt signing key pair. Generate with `node scripts/generate-receipt-key.mjs`. |
 
 ## API
 
@@ -97,6 +98,38 @@ X-Chunk-Name: chunk-000042        (optional, sanitised, for upstream metadata)
 Returns the stored bytes. The CID is validated against a strict alphanumeric
 pattern before it is used, so it can never traverse a path or switch protocol.
 
+### `POST /api/proofs/record`
+
+Issues a signed receipt for a stored document and queues it for the next batch
+anchor. This is what lets a user register a document with no wallet and no gas.
+
+```json
+{ "fileHash": "0x…", "merkleRoot": "0x…", "manifestCID": "bafy…",
+  "fileSize": 4096, "totalChunks": 1, "encrypted": true, "suite": "aes-256-gcm" }
+```
+
+### `POST /api/proofs/batch`
+
+Builds a batch from everything pending and returns the Merkle root for the
+operator to anchor on-chain, plus the list of documents it covers.
+
+Submission is deliberately **not** done here: it needs a funded key, and a key
+with spending power does not belong in the same process that accepts public
+uploads. Take the root and submit it with `anchorBatch(root, size, uri)` from
+wherever you keep that key.
+
+### `GET /api/proofs/key` — public
+
+The receipt verification key, as a JWK, plus its key id.
+
+### `GET /api/proofs/inclusion/<fileHash>` — public
+
+The inclusion proof for one document, checkable against the anchored batch root.
+
+Both of these are unauthenticated on purpose: verifying someone else's document
+is a public act, and a court, employer or regulator checking a certificate has
+no account here.
+
 ## Point the frontend at it
 
 In `js/config.js`:
@@ -123,12 +156,16 @@ removes cross-origin requests entirely, which is the simplest deployment.
    everyone. Revoking means removing it from `OREOCHAIN_API_KEYS` and restarting.
 4. **Ship the logs somewhere.** Each line is JSON with an event, a key digest
    (never the key), byte counts and CIDs.
-5. Rate limits are per process and in memory. Behind multiple instances each
+5. **Set `OREOCHAIN_RECEIPT_KEY` before going live.** Without it the gateway
+   signs receipts with a throwaway key and warns at startup — every restart
+   then invalidates every receipt previously issued, because nobody can verify
+   them any more. Anchored batches are unaffected; they live on-chain.
+6. Rate limits are per process and in memory. Behind multiple instances each
    enforces its own share; move to a shared store if you need a global limit.
    Authenticated callers are bucketed by key, anonymous ones by source address
    — which behind a reverse proxy is the proxy's address, so every anonymous
    caller shares one bucket unless the proxy enforces its own limits.
-6. `SIGTERM` drains in-flight requests before exiting, so a deploy does not
+7. `SIGTERM` drains in-flight requests before exiting, so a deploy does not
    drop an upload mid-chunk.
 
 ## What is not here yet
@@ -137,6 +174,11 @@ Honest list, so nobody assumes otherwise:
 
 - **No per-user quota or billing.** Rate limiting bounds the *rate*, not the
   total. A client within its rate limit can still pin indefinitely.
-- **No persistence.** Rate-limit buckets and the memory backend reset on restart.
+- **No persistence.** Rate-limit buckets, the pending anchor queue and the
+  memory backend all reset on restart. Losing the pending queue loses the
+  *anchor*, not the documents: chunks and manifests are already stored and
+  receipts are already issued and verifiable. Re-queue and anchor again.
+- **Anchor submission is manual.** The gateway builds the batch; something with
+  a funded key has to send the transaction.
 - **No key rotation without a restart.** Keys are read once at startup.
 - **No upload deduplication.** The same chunk pinned twice is pinned twice.
