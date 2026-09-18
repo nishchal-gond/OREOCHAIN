@@ -283,8 +283,9 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              245 tests, including EVM cross-checks
+test/                              247 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
+docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
 
 `js/core/` and `js/storage/` have no DOM and no network dependency, so the same
@@ -327,7 +328,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test     # 245 tests
+npm test     # 247 tests
 npm run abi  # regenerate js/contract-abi.js after changing the contract
 ```
 
