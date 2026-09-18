@@ -61,16 +61,17 @@ window.OREOCHAIN_CONFIG = {
     //
     // Argon2id is memory-hard: every guess must allocate and traverse this
     // much memory, which is what a GPU or ASIC cannot cheaply multiply.
-    // 47104 KiB / 1 pass is an OWASP-recommended profile and costs roughly
-    // 0.7s in the browser. Raise memoryKiB on a server, where blocking a
-    // thread for longer is acceptable.
+    // 65536 KiB / 2 passes costs roughly 2.2s and is about 2.8x as expensive
+    // to attack as a 46 MiB single-pass profile. It is affordable only because
+    // derivation runs in a worker and no longer freezes the page. Raise it
+    // further on a server, where nobody is watching a spinner.
     //
     // "pbkdf2-sha256" is still readable so files sealed before this change
     // still open, but it is memory-cheap and should not be chosen for new files.
     kdf: {
       name: "argon2id",
-      memoryKiB: 47104,
-      iterations: 1,
+      memoryKiB: 65536,
+      iterations: 2,
       parallelism: 1,
     },
   },

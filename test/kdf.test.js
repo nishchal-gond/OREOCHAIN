@@ -61,7 +61,7 @@ test("Argon2id is the default for new files", () => {
   assert.equal(kdfSpec().name, KDF_ARGON2ID);
 });
 
-test("the shipped Argon2id parameters meet the OWASP floor", () => {
+test("the shipped Argon2id parameters clear the OWASP floor with room to spare", () => {
   // m >= 19456 KiB with t >= 1, p = 1 is OWASP's minimum recommended profile.
   assert.ok(
     ARGON2ID_DEFAULTS.memoryKiB >= 19456,
@@ -70,6 +70,16 @@ test("the shipped Argon2id parameters meet the OWASP floor", () => {
   assert.ok(ARGON2ID_DEFAULTS.iterations >= 1);
   assert.ok(ARGON2ID_DEFAULTS.parallelism >= 1);
   assert.ok(ARGON2ID_DEFAULTS.memoryKiB >= MANIFEST_LIMITS.minArgon2MemoryKiB);
+
+  // Attacker cost scales roughly with memory x passes. Pin the intended
+  // profile so a future edit cannot quietly weaken it: a one-character change
+  // to either number is invisible in review and halves the cost of an attack.
+  assert.equal(ARGON2ID_DEFAULTS.memoryKiB, 65536);
+  assert.equal(ARGON2ID_DEFAULTS.iterations, 2);
+  assert.ok(
+    ARGON2ID_DEFAULTS.memoryKiB * ARGON2ID_DEFAULTS.iterations >= 47104,
+    "the default must never cost an attacker less than the profile it replaced"
+  );
 });
 
 test("the legacy PBKDF2 floor is still the OWASP recommendation", () => {
@@ -103,8 +113,9 @@ test("a bare number is rejected rather than silently meaning defaults", () => {
 });
 
 test("describeKdf states the parameters a user is relying on", () => {
-  assert.match(describeKdf("argon2id"), /Argon2id \(47104 KiB, 1 pass, p=1\)/);
+  assert.match(describeKdf("argon2id"), /Argon2id \(65536 KiB, 2 passes, p=1\)/);
   assert.match(describeKdf({ name: "argon2id", iterations: 3 }), /3 passes/);
+  assert.match(describeKdf({ name: "argon2id", iterations: 1 }), /1 pass,/);
   assert.match(describeKdf({ name: "pbkdf2-sha256" }), /PBKDF2-SHA256 \(600000/);
 });
 
@@ -328,4 +339,38 @@ test("packFile rejects an unusable kdf before doing any work", async () => {
     () => packFile(randomBytes(64), { passphrase: "pw", kdf: 1000 }),
     /must be a name or a parameter object/
   );
+});
+
+test("a file sealed under the previous default profile still opens", async () => {
+  /*
+   * The parameters that sealed a file travel with it, so raising the default
+   * must not strand anything already stored. If it did, those files would be
+   * destroyed outright — there is no path to the plaintext without the key.
+   *
+   * This uses the real profile that shipped before the raise (46 MiB, one
+   * pass), not a cheap stand-in, because the point is that genuine older
+   * files open.
+   */
+  const previousDefault = { name: "argon2id", memoryKiB: 47104, iterations: 1, parallelism: 1 };
+
+  const { manifest, restored, data } = await roundTrip(previousDefault);
+
+  assert.ok(equalBytes(restored.bytes, data));
+  assert.equal(manifest.kdf.memoryKiB, 47104);
+  assert.equal(manifest.kdf.iterations, 1);
+
+  // And the current default really is different, so this is a real regression
+  // guard rather than a test that would pass either way.
+  assert.notEqual(manifest.kdf.memoryKiB, ARGON2ID_DEFAULTS.memoryKiB);
+});
+
+test("a new file is sealed with the current default, not a stale one", async () => {
+  // packFile with no kdf option must pick up ARGON2ID_DEFAULTS. Cheap
+  // parameters cannot verify this, so it derives at full cost once.
+  const { manifest } = await roundTrip(undefined);
+
+  assert.equal(manifest.kdf.name, KDF_ARGON2ID);
+  assert.equal(manifest.kdf.memoryKiB, ARGON2ID_DEFAULTS.memoryKiB);
+  assert.equal(manifest.kdf.iterations, ARGON2ID_DEFAULTS.iterations);
+  assert.equal(manifest.kdf.parallelism, ARGON2ID_DEFAULTS.parallelism);
 });

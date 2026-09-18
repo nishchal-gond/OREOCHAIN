@@ -36,7 +36,7 @@ So OREOCHAIN uses standard primitives, from the platform's own implementation:
 |---|---|
 | Chunk encryption | AES-256-GCM, XChaCha20-Poly1305, or both |
 | Key derivation | HKDF-SHA256 |
-| Passphrase stretching | Argon2id (46 MiB, 1 pass) — PBKDF2-SHA256 read-only for legacy files |
+| Passphrase stretching | Argon2id (64 MiB, 2 passes) — PBKDF2-SHA256 read-only for legacy files |
 | Content hashing | SHA-256 |
 | Integrity commitment | Merkle tree, domain-separated |
 
@@ -168,8 +168,10 @@ recommends by default: Argon2d's data-dependent addressing resists time-memory
 trade-offs but leaks through cache side channels, Argon2i is the reverse, and
 Argon2id takes one pass of each.
 
-The shipped profile is m=47104 KiB, t=1, p=1, an OWASP-recommended setting,
-costing roughly 0.7s. It runs in a dedicated worker
+The shipped profile is m=65536 KiB, t=2, p=1, comfortably above OWASP's
+recommended settings and roughly 2.8 times as expensive to attack as the
+46 MiB single-pass profile it replaced. It costs about 2.2s, which is
+affordable only because it runs in a dedicated worker
 (`js/core/kdf-worker.js`) rather than on the page's thread, so the tab stays
 responsive and the cost is no longer paid in visible jank — which is what makes
 raising these parameters practical. A server can afford more memory and should
@@ -202,7 +204,7 @@ random per-file key:
 
 ```
 fileKey        = 32 random bytes
-KEK            = Argon2id(passphrase, kdfSalt, m=47104KiB, t=1, p=1)
+KEK            = Argon2id(passphrase, kdfSalt, m=65536KiB, t=2, p=1)
 wrappedFileKey = AES-256-GCM(KEK, fileKey)
 ```
 
@@ -323,8 +325,10 @@ an audit.
   cost per guess by orders of magnitude; it does not make `password1` safe. The
   wrapped key is public, so a short passphrase remains the most likely way an
   attacker gets in.
-- **Key derivation still takes about a second**, and longer on a low-end phone.
-  The worker keeps the page responsive, but the user is still waiting.
+- **Key derivation takes about two seconds**, and longer on a low-end phone.
+  The worker keeps the page responsive, but the user is still waiting. That
+  wait is the price of the attacker's cost; it cannot be reduced without
+  reducing theirs.
 - **A worker does not isolate key material from the page.** It is a separate
   thread in the same origin and the same process, not a security boundary.
   Anything that can run script on the page can still reach the derived key;

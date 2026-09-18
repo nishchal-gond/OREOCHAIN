@@ -2,7 +2,7 @@
  * Key-derivation worker.
  *
  * Argon2id is memory-hard by design, which means it is also slow by design:
- * roughly 0.7 seconds of solid computation at the shipped parameters. Run on
+ * roughly 2 seconds of solid computation at the shipped parameters. Run on
  * the main thread that freezes the tab — no scrolling, no clicking, no
  * repainting — and the freeze gets worse on exactly the low-end phones where a
  * user is most likely to be uploading something important.

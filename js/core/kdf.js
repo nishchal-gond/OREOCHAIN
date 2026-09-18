@@ -39,17 +39,23 @@ export const DEFAULT_KDF = KDF_ARGON2ID;
 const KEY_BYTES = 32;
 
 /**
- * OWASP's recommended Argon2id profile with the largest memory of the
- * practical options: m=46 MiB, t=1, p=1.
+ * m=64 MiB, t=2, p=1 — comfortably above OWASP's recommended profiles.
  *
- * Memory is the parameter that hurts a parallel attacker, so it is preferred
- * over passes when a budget has to be spent on one of them. This costs roughly
- * 0.7s in pure JavaScript on a desktop — the ceiling worth paying when the
- * derivation blocks the UI thread. Raise it for server-side use.
+ * Memory is the parameter that hurts a parallel attacker most, so it gets the
+ * larger share of the budget, but passes are not free to an attacker either:
+ * cost scales roughly with memory x passes, making this about 2.8 times as
+ * expensive to attack as the 46 MiB single-pass profile it replaces.
+ *
+ * It costs roughly 2.2s in pure JavaScript on a desktop. That is affordable
+ * only because derivation runs in a worker (js/core/kdf-worker.js) and no
+ * longer freezes the page — on the main thread this would have been an
+ * unusable amount of jank, which is exactly why the worker came first.
+ *
+ * A server, where nobody is watching a spinner, can raise it further.
  */
 export const ARGON2ID_DEFAULTS = Object.freeze({
-  memoryKiB: 47104,
-  iterations: 1,
+  memoryKiB: 65536,
+  iterations: 2,
   parallelism: 1,
 });
 
@@ -78,7 +84,7 @@ export function kdfSpec(input = DEFAULT_KDF) {
   if (typeof input === "number" || typeof input === "boolean" || input === null) {
     throw new Error(
       `kdf must be a name or a parameter object, received ${typeof input} — ` +
-        'e.g. "argon2id" or { name: "argon2id", memoryKiB: 47104 }'
+        'e.g. "argon2id" or { name: "argon2id", memoryKiB: 65536 }'
     );
   }
   const raw = typeof input === "string" ? { name: input } : { ...input };
