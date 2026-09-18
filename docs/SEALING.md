@@ -88,11 +88,12 @@ written.
 | Setting | Value |
 |---|---|
 | Default KDF | `argon2id` (`DEFAULT_KDF`) |
-| Memory | 47104 KiB (46 MiB) |
-| Passes | 1 |
+| Memory | 65536 KiB (64 MiB) |
+| Passes | 2 |
 | Parallelism | 1 |
 | Derived key | 256 bits |
 | KDF salt | 16 random bytes, unique per file |
+| Cost to derive | ~2.2s in pure JavaScript on a desktop, longer on a phone |
 | Legacy PBKDF2 | 600,000 iterations, SHA-256 — read-only |
 
 Argon2id rather than Argon2i or Argon2d: the hybrid RFC 9106 recommends by
@@ -132,7 +133,7 @@ one where the parameters were chosen.
 |---|---|---|---|
 | [#5](https://github.com/nishchal-gond/OREOCHAIN/pull/5) | 2026-09-17 | Argon2id (m=47104 KiB, t=1, p=1) replaces PBKDF2 for new files; PBKDF2 kept readable; parameter bounds added | Merged |
 | [#6](https://github.com/nishchal-gond/OREOCHAIN/pull/6) | 2026-09-18 | Derivation moved into a worker so the ~0.7s no longer freezes the page; `worker-src 'self' blob:` added to the gateway CSP | Merged |
-| [#7](https://github.com/nishchal-gond/OREOCHAIN/pull/7) | 2026-09-18 | Raises the default to m=65536 KiB, t=2 — about 2.78× as expensive to attack, ~2.2s to derive | **Open, not merged** |
+| [#7](https://github.com/nishchal-gond/OREOCHAIN/pull/7) | 2026-09-18 | Raised the default to m=65536 KiB, t=2 — about 2.78× as expensive to attack, ~2.2s to derive | Merged |
 
 The ordering was deliberate. PBKDF2 is memory-cheap, so a GPU runs thousands of
 guesses in parallel; Argon2id forces each guess to allocate and traverse tens of
@@ -142,9 +143,9 @@ and only then was the stronger profile in #7 affordable — 2.2 seconds on the
 main thread would have been unusable jank, worst on the low-end phones where it
 is slowest.
 
-The values in §3 are what master ships today. If #7 merges, memory becomes
-65536 KiB and passes become 2, and `js/config.example.js`, `docs/SECURITY.md`
-and the Readme change with it.
+The values in §3 are what master ships today. A file sealed under the 46 MiB
+single-pass profile between #5 and #7 still opens under the current default,
+for the reasons in §5.
 
 Neither raise helps a genuinely weak passphrase. They multiply the cost per
 guess; they do not make `password1` safe. The worker is not a security boundary
