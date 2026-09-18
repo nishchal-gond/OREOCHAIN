@@ -105,9 +105,8 @@ the manifest, so anyone who fetches one can guess passphrases offline at
 hardware speed — the cost of a single guess is the whole defence, and it is the
 parameter an attacker cannot buy their way around. Argon2id forces every guess
 to allocate and traverse 64 MB twice over, which is exactly what a GPU or ASIC
-cannot
-cheaply multiply. PBKDF2, which needs almost no memory, remains readable so
-files sealed before this change still open.
+cannot cheaply multiply. PBKDF2, which needs almost no memory, remains readable
+so files sealed before this change still open.
 
 That derivation runs in a dedicated worker, so the ~2.2s it costs does not
 freeze the page. Where no worker is available it falls back to the calling
