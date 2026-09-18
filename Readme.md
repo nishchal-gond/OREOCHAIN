@@ -108,6 +108,10 @@ to allocate and traverse 46 MB, which is exactly what a GPU or ASIC cannot
 cheaply multiply. PBKDF2, which needs almost no memory, remains readable so
 files sealed before this change still open.
 
+That derivation runs in a dedicated worker, so the ~0.7s it costs does not
+freeze the page. Where no worker is available it falls back to the calling
+thread — slower and visibly so, but still correct.
+
 Two properties follow that a single-key design cannot offer:
 
 - **Blast radius.** Compromising one chunk's key reveals that chunk and nothing
@@ -267,6 +271,7 @@ js/core/suites.js                  cipher suite registry
 js/core/manifest.js                the pipeline: pack, seal, open, restore, stream
 js/core/anchor.js                  batch trees and inclusion proofs
 js/core/kdf.js                     Argon2id passphrase stretching (+ legacy PBKDF2)
+js/core/kdf-worker.js              runs derivation off the page's thread
 js/core/receipt.js                 signed receipts
 js/core/validate.js                strict validation of untrusted manifests
 js/core/limits.js                  resource limits, all caller-overridable
@@ -278,7 +283,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              226 tests, including EVM cross-checks
+test/                              245 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 ```
 
@@ -322,12 +327,12 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test     # 226 tests
+npm test     # 245 tests
 npm run abi  # regenerate js/contract-abi.js after changing the contract
 ```
 
-Coverage includes the RFC 9106 known-answer vector for Argon2id, chunk
-round-trips at every boundary size, Merkle proofs across
+Coverage includes the RFC 9106 known-answer vector for Argon2id, the derivation
+worker executed in a real thread, chunk round-trips at every boundary size, Merkle proofs across
 every tree shape, tamper/reorder/splice/truncation detection, all three cipher
 suites, retry and resume behaviour, hostile manifests, streaming and
 cancellation, batch anchoring and receipt forgery, and the gateway's auth, rate
@@ -373,18 +378,15 @@ undocumented is a security system nobody can evaluate.
 
 In priority order, with reasoning rather than dates:
 
-1. **Move key derivation to a Web Worker.** Argon2id is pure JavaScript here and
-   blocks the UI thread for about a second. A worker would keep the tab
-   responsive and make stronger parameters affordable.
-2. **Automated batch submission**, so anchoring needs no operator action.
-3. **Multi-recipient key wrapping** — share a document without sharing a
+1. **Automated batch submission**, so anchoring needs no operator action.
+2. **Multi-recipient key wrapping** — share a document without sharing a
    passphrase.
-4. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap)
+3. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap)
    for records that must stay confidential for decades. "Harvest now, decrypt
    later" is a real concern for long-lived documents.
-5. **Replication across independent pinning providers**, with on-chain
+4. **Replication across independent pinning providers**, with on-chain
    challenges proving a provider still holds a given block.
-6. **A professional cryptographic review**, before this protects anything that
+5. **A professional cryptographic review**, before this protects anything that
    matters.
 
 ---

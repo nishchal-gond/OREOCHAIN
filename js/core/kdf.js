@@ -150,7 +150,7 @@ function deriveArgon2id(passphrase, salt, spec) {
  * @param {Uint8Array} salt unique per file, so one cracking effort buys one file
  * @param {object|string} spec see kdfSpec()
  */
-export async function deriveKeyEncryptionKey(passphrase, salt, spec = DEFAULT_KDF) {
+export async function deriveKeyEncryptionKey(passphrase, salt, spec = DEFAULT_KDF, options = {}) {
   if (typeof passphrase !== "string" || passphrase.length === 0) {
     throw new Error("a passphrase is required");
   }
@@ -159,9 +159,147 @@ export async function deriveKeyEncryptionKey(passphrase, salt, spec = DEFAULT_KD
   }
 
   const normalized = kdfSpec(spec);
+  const { worker = "auto", workerTimeoutMs = WORKER_TIMEOUT_MS, onFallback } = options;
+
+  if (worker !== false) {
+    const factory =
+      typeof worker === "function" ? worker : injectedWorkerFactory || defaultWorkerFactory;
+    try {
+      return await deriveViaWorker(passphrase, salt, normalized, factory, workerTimeoutMs);
+    } catch (error) {
+      /*
+       * Only fall back when no usable worker exists — no Worker in this
+       * runtime, or the script failed to load. A derivation that ran and
+       * failed, or timed out, is propagated: repeating it inline would block
+       * the thread for the same reason and then fail identically, and a
+       * timeout silently followed by a second attempt is how a one-second
+       * wait becomes a minute-long one.
+       */
+      if (!error.workerUnavailable) throw error;
+      if (onFallback) onFallback(error);
+    }
+  }
+
   return normalized.name === KDF_ARGON2ID
     ? deriveArgon2id(passphrase, salt, normalized)
     : derivePbkdf2(passphrase, salt, normalized.iterations);
 }
 
 export const _internals = { deriveArgon2id, derivePbkdf2, KEY_BYTES };
+
+// ---------------------------------------------------------------- worker path
+
+/**
+ * A derivation should never take this long. Reaching it means something is
+ * wrong with the worker, not that the parameters were ambitious.
+ */
+const WORKER_TIMEOUT_MS = 60_000;
+
+let requestCounter = 0;
+let injectedWorkerFactory = null;
+
+/** Override how workers are created. Used by tests and by bundled builds. */
+export function setKdfWorkerFactory(factory) {
+  injectedWorkerFactory = factory;
+}
+
+function defaultWorkerFactory() {
+  if (typeof Worker === "undefined") return null; // Node, or no worker support
+  return new Worker(new URL("./kdf-worker.js", import.meta.url), { type: "module" });
+}
+
+/**
+ * The worker side of the protocol, kept here rather than in the worker file so
+ * it can be exercised directly by tests without spawning a thread.
+ *
+ * Returns a response object instead of throwing: a failure has to travel back
+ * across postMessage as data either way.
+ */
+export async function handleKdfRequest(request) {
+  const id = request ? request.id : undefined;
+  try {
+    if (!request || request.type !== "derive") {
+      throw new Error(`unknown request type: ${request ? request.type : typeof request}`);
+    }
+
+    const salt = request.salt instanceof Uint8Array ? request.salt : new Uint8Array(request.salt);
+    // worker: false — this is already the worker; anything else would recurse.
+    const key = await deriveKeyEncryptionKey(request.passphrase, salt, request.spec, {
+      worker: false,
+    });
+
+    // Copy into an exactly-sized buffer so the whole thing can be transferred.
+    const out = new Uint8Array(key);
+    return { id, ok: true, key: out.buffer };
+  } catch (error) {
+    return { id, ok: false, error: error.message };
+  }
+}
+
+function deriveViaWorker(passphrase, salt, spec, factory, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let worker;
+    try {
+      worker = factory();
+    } catch (error) {
+      error.workerUnavailable = true;
+      reject(error);
+      return;
+    }
+    if (!worker) {
+      const error = new Error("no worker implementation available");
+      error.workerUnavailable = true;
+      reject(error);
+      return;
+    }
+
+    const id = `kdf-${++requestCounter}`;
+    let settled = false;
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // Terminate rather than pool: the worker still holds the passphrase and
+      // tens of megabytes of Argon2 state, and there is no way to scrub them.
+      try {
+        worker.terminate();
+      } catch {
+        /* a worker that cannot be terminated is not worth failing over */
+      }
+      fn(value);
+    };
+
+    const timer = setTimeout(
+      () => finish(reject, new Error(`key derivation timed out after ${timeoutMs}ms`)),
+      timeoutMs
+    );
+
+    worker.onmessage = (event) => {
+      const data = event && "data" in event ? event.data : event;
+      if (!data || data.id !== id) return; // not ours
+      if (data.ok) finish(resolve, new Uint8Array(data.key));
+      else finish(reject, new Error(data.error || "key derivation failed in the worker"));
+    };
+
+    worker.onerror = (event) => {
+      // The worker script failed to load or threw at the top level — a broken
+      // deployment, not a broken passphrase. Flagged so the caller can fall
+      // back to deriving inline rather than failing outright.
+      const error = new Error(
+        (event && (event.message || event.error?.message)) || "key derivation worker failed"
+      );
+      error.workerUnavailable = true;
+      finish(reject, error);
+    };
+
+    worker.postMessage({
+      id,
+      type: "derive",
+      passphrase,
+      // A copy, cloned rather than transferred, so the caller's salt survives.
+      salt: salt.slice(),
+      spec,
+    });
+  });
+}

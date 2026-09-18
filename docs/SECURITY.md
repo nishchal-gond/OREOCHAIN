@@ -168,10 +168,19 @@ recommends by default: Argon2d's data-dependent addressing resists time-memory
 trade-offs but leaks through cache side channels, Argon2i is the reverse, and
 Argon2id takes one pass of each.
 
-The shipped profile is m=47104 KiB, t=1, p=1, an OWASP-recommended setting. It
-costs roughly 0.7s in the browser, which is the ceiling worth paying while the
-derivation blocks the UI thread; a server can afford more memory and should use
-it. Implementation correctness is checked against the **RFC 9106 §5.3 known-answer
+The shipped profile is m=47104 KiB, t=1, p=1, an OWASP-recommended setting,
+costing roughly 0.7s. It runs in a dedicated worker
+(`js/core/kdf-worker.js`) rather than on the page's thread, so the tab stays
+responsive and the cost is no longer paid in visible jank — which is what makes
+raising these parameters practical. A server can afford more memory and should
+use it.
+
+Where no worker exists, or where the worker script fails to load, derivation
+falls back to the calling thread: slower and visibly so, but still correct. A
+worker that *ran* and failed, or that stopped answering, is reported instead —
+retrying inline would block for the same reason and fail the same way, and a
+timeout quietly followed by a second attempt is how a one-second wait becomes a
+minute-long one. Implementation correctness is checked against the **RFC 9106 §5.3 known-answer
 vector** in `test/kdf.test.js` — a subtly wrong KDF still produces
 plausible-looking bytes and silently provides a fraction of the intended
 strength.
@@ -314,9 +323,12 @@ an audit.
   cost per guess by orders of magnitude; it does not make `password1` safe. The
   wrapped key is public, so a short passphrase remains the most likely way an
   attacker gets in.
-- **Key derivation blocks the UI thread.** The implementation is pure
-  JavaScript, so a browser tab is unresponsive for roughly a second while it
-  runs, and longer on a low-end phone. Moving it to a Web Worker is the fix.
+- **Key derivation still takes about a second**, and longer on a low-end phone.
+  The worker keeps the page responsive, but the user is still waiting.
+- **A worker does not isolate key material from the page.** It is a separate
+  thread in the same origin and the same process, not a security boundary.
+  Anything that can run script on the page can still reach the derived key;
+  the worker is a responsiveness measure, not a containment one.
 - **Revocation does not delete anything.** `revokeDocument` clears the on-chain
   record. Chunks already pinned remain wherever they were pinned. Treat any
   upload as permanent.
@@ -356,21 +368,23 @@ an audit.
    The owner controls the exporter allowlist.
 5. **Serve over HTTPS.** WebCrypto is unavailable on insecure origins, and the
    page's integrity is what everything else rests on.
+6. **Allow `worker-src 'self'` in your Content-Security-Policy.** Browsers that
+   honour `worker-src` do not fall back to `script-src`, so omitting it blocks
+   the derivation worker and silently pushes every derivation back onto the
+   page's thread. The bundled gateway already sets it.
 
 ---
 
 ## 6. Roadmap, in priority order
 
-1. **Move key derivation to a Web Worker**, so a memory-hard KDF does not
-   freeze the tab and stronger parameters become affordable.
-2. **A backend pinning proxy** so credentials leave the browser entirely, plus
+1. **A backend pinning proxy** so credentials leave the browser entirely, plus
    rate limiting and per-user quotas.
-3. **Multi-recipient key wrapping** — wrap the file key to several public keys so
+2. **Multi-recipient key wrapping** — wrap the file key to several public keys so
    a document can be shared without sharing a passphrase.
-4. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap) for
+3. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap) for
    documents that must stay confidential for decades. "Harvest now, decrypt
    later" is a real concern for long-lived records.
-5. **Replication across independent pinning providers**, with on-chain challenges
+4. **Replication across independent pinning providers**, with on-chain challenges
    using `verifyChunk` to prove a provider still holds a given block.
-6. **A professional cryptographic review** before this protects anything that
+5. **A professional cryptographic review** before this protects anything that
    matters.
