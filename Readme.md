@@ -285,6 +285,7 @@ server/ratelimit.mjs               per-key token bucket
 
 test/                              245 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
+docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
 
 `js/core/` and `js/storage/` have no DOM and no network dependency, so the same
