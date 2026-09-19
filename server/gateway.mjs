@@ -541,7 +541,7 @@ export function createHandler(config, backend, deps = {}) {
             "this gateway could not reach the chain to check. This is not a statement that " +
             "the document is unanchored.",
         },
-        { receipt, batch, registration: null, chainRead: await chainRead() }
+        { receipt, batch, registration: null, chainRead: chainReadFrom(anchor, registration) }
       );
     }
 
@@ -627,21 +627,41 @@ export function createHandler(config, backend, deps = {}) {
       }
     }
 
-    const materials = { receipt, batch, registration: registered, chainRead: await chainRead() };
-    const claim = { verified: anchoredBy.length > 0, status: "", anchoredBy };
+    const materials = {
+      receipt,
+      batch,
+      registration: registered,
+      chainRead: chainReadFrom(anchor, registration),
+    };
+    const claim = { status: "", anchoredBy, verified: false };
     if (warnings.length > 0) claim.warnings = warnings;
 
-    if (claim.verified) {
-      claim.status = "verified";
-      claim.explain = explainVerified(anchoredBy, batch, registered);
-      return answer(200, claim, materials);
-    }
-
+    /*
+     * A disagreement outranks a confirmation, even when the other path checked
+     * out perfectly.
+     *
+     * If the chain says this document's Merkle root is one thing and this
+     * gateway receipted another, the two are not describing the same file, and
+     * "anchored" is not a useful thing to say about it — whichever path
+     * happened to verify. Reporting verified with a warning attached invites
+     * exactly the reading that matters least: the word, not the caveat.
+     */
     if (warnings.length > 0) {
       claim.status = "disputed";
       claim.explain =
-        "this document could not be confirmed, and what is on the chain disagrees with " +
-        "what this gateway recorded. See warnings.";
+        anchoredBy.length > 0
+          ? "what is on the chain disagrees with what this gateway recorded about this " +
+            "document, so it is not being called anchored even though " +
+            `${anchoredBy.join(" and ")} checked out. See warnings.`
+          : "this document could not be confirmed, and what is on the chain disagrees with " +
+            "what this gateway recorded. See warnings.";
+      return answer(200, claim, materials);
+    }
+
+    if (anchoredBy.length > 0) {
+      claim.verified = true;
+      claim.status = "verified";
+      claim.explain = explainVerified(anchoredBy, batch, registered);
       return answer(200, claim, materials);
     }
 
@@ -660,21 +680,24 @@ export function createHandler(config, backend, deps = {}) {
   }
 
   /**
-   * Which contract, on which chain, this gateway read — so a verifier can go
-   * and read the same thing rather than take the answer on trust.
+   * Which contract, on which chain, the answer actually came from.
+   *
+   * Taken from the lookup itself rather than read separately, so the two
+   * halves of a response cannot disagree: a verifier told which chain was
+   * read, and an anchor that came from a different one, is worse off than a
+   * verifier told nothing.
    */
-  async function chainRead() {
-    if (!confirmer || !confirmer.reader) return null;
-    try {
-      return {
-        contract: confirmer.reader.contractAddress,
-        chainId: await confirmer.reader.chainId(),
-      };
-    } catch {
-      // A chain we cannot even name is still a chain we could not reach; the
-      // caller's answer already says so.
-      return { contract: confirmer.reader.contractAddress, chainId: null };
+  function chainReadFrom(...results) {
+    for (const result of results) {
+      if (result && result.chainId) {
+        return { contract: result.contract, chainId: result.chainId };
+      }
     }
+    // Reached only when nothing could be read at all; naming the contract we
+    // would have asked still tells a verifier where to look themselves.
+    return confirmer && confirmer.reader
+      ? { contract: confirmer.reader.contractAddress, chainId: null }
+      : null;
   }
 
   /** One sentence a person can read, for each way a document can be anchored. */

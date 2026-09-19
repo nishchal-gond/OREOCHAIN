@@ -47,21 +47,21 @@ export async function createChainReader(options) {
   const web3 = new Web3(rpcUrl);
   const contract = new web3.eth.Contract(CHUNKED_VERIFICATION_ABI, contractAddress);
 
-  /**
-   * Read once and kept: a chain does not change its id underneath a running
-   * process, and a verifier needs it to know which chain to go and look at.
-   */
-  let chainId = null;
-
   return {
     web3,
     contract,
     contractAddress,
 
-    async chainId() {
-      if (chainId === null) chainId = toNumber(await web3.eth.getChainId());
-      return chainId;
-    },
+    /**
+     * Asked every time rather than memoised.
+     *
+     * A running process is not entitled to assume its RPC endpoint still
+     * points where it did: a DNS change, a failover, or an operator editing a
+     * URL can put a different network behind the same address. Caching this
+     * meant the answer could name one chain while the data came from another,
+     * which is worse than either being wrong on its own.
+     */
+    chainId: async () => toNumber(await web3.eth.getChainId()),
 
     blockNumber: async () => toNumber(await web3.eth.getBlockNumber()),
 

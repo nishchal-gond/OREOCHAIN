@@ -48,6 +48,23 @@ export function createAnchorConfirmer(options) {
   let head = { at: 0, value: null };
   const counts = { lookups: 0, hits: 0, chainReads: 0, failures: 0 };
 
+  /**
+   * Which network a cached answer came from.
+   *
+   * An anchor is immutable on the chain that holds it and means nothing on
+   * any other, so every cache entry is keyed by the network it was read from
+   * as well as the root. Without this, an RPC endpoint that comes to point
+   * somewhere else — a DNS change, a failover, an edited URL — keeps being
+   * answered from the old network's data for the rest of the cache lifetime,
+   * while the response says it read the new one.
+   */
+  async function network() {
+    const chainId = await reader.chainId();
+    return { chainId, contract: reader.contractAddress };
+  }
+
+  const keyFor = (where, id) => `${where.chainId}:${where.contract}:${id}`;
+
   function remember(store, key, entry, lifetime) {
     store.set(key, { at: now(), expires: now() + lifetime, entry });
     // Oldest-inserted out first. A cache that can be made to grow without
@@ -77,17 +94,29 @@ export function createAnchorConfirmer(options) {
     async check(root) {
       counts.lookups++;
 
-      const cached = cache.get(root);
+      let where;
+      try {
+        where = await network();
+      } catch (error) {
+        // Not knowing which chain we are on is not an answer about a
+        // document: it is the unavailable case, and never a cache hit.
+        counts.failures++;
+        log.warn("chain identity unavailable", { root, message: error.message });
+        return { state: UNAVAILABLE, message: error.message };
+      }
+
+      const key = keyFor(where, root);
+      const cached = cache.get(key);
       if (cached && cached.expires > now()) {
         counts.hits++;
-        if (cached.entry.state !== CONFIRMED) return cached.entry;
+        if (cached.entry.state !== CONFIRMED) return { ...cached.entry, ...where };
 
         // The anchor is immutable; how deep it is buried is not. Recomputing
         // it against a briefly-cached head keeps the answer current without a
         // second lookup of the anchor itself.
         try {
           const confirmations = (await chainHead()) - cached.entry.block + 1;
-          return { ...cached.entry, confirmations };
+          return { ...cached.entry, ...where, confirmations };
         } catch (error) {
           counts.failures++;
           return { state: UNAVAILABLE, message: error.message };
@@ -100,8 +129,8 @@ export function createAnchorConfirmer(options) {
 
         if (!found) {
           const entry = { state: ABSENT };
-          remember(cache, root, entry, negativeTtlMs);
-          return entry;
+          remember(cache, key, entry, negativeTtlMs);
+          return { ...entry, ...where };
         }
 
         const entry = {
@@ -110,8 +139,8 @@ export function createAnchorConfirmer(options) {
           size: found.size,
           txHash: found.txHash,
         };
-        remember(cache, root, entry, ttlMs);
-        return { ...entry, confirmations: currentHead - found.block + 1 };
+        remember(cache, key, entry, ttlMs);
+        return { ...entry, ...where, confirmations: currentHead - found.block + 1 };
       } catch (error) {
         /*
          * Deliberately not cached and deliberately not ABSENT. The caller
@@ -135,13 +164,23 @@ export function createAnchorConfirmer(options) {
     async checkDocument(fileHash) {
       counts.lookups++;
 
-      const cached = documents.get(fileHash);
+      let where;
+      try {
+        where = await network();
+      } catch (error) {
+        counts.failures++;
+        log.warn("chain identity unavailable", { fileHash, message: error.message });
+        return { state: UNAVAILABLE, message: error.message };
+      }
+
+      const key = keyFor(where, fileHash);
+      const cached = documents.get(key);
       if (cached && cached.expires > now()) {
         counts.hits++;
-        if (cached.entry.state !== CONFIRMED) return cached.entry;
+        if (cached.entry.state !== CONFIRMED) return { ...cached.entry, ...where };
         try {
           const confirmations = (await chainHead()) - cached.entry.block + 1;
-          return { ...cached.entry, confirmations };
+          return { ...cached.entry, ...where, confirmations };
         } catch (error) {
           counts.failures++;
           return { state: UNAVAILABLE, message: error.message };
@@ -157,13 +196,13 @@ export function createAnchorConfirmer(options) {
 
         if (!found) {
           const entry = { state: ABSENT };
-          remember(documents, fileHash, entry, negativeTtlMs);
-          return entry;
+          remember(documents, key, entry, negativeTtlMs);
+          return { ...entry, ...where };
         }
 
         const entry = { state: CONFIRMED, ...found };
-        remember(documents, fileHash, entry, documentTtlMs);
-        return { ...entry, confirmations: currentHead - found.block + 1 };
+        remember(documents, key, entry, documentTtlMs);
+        return { ...entry, ...where, confirmations: currentHead - found.block + 1 };
       } catch (error) {
         counts.failures++;
         log.warn("chain document lookup failed", { fileHash, message: error.message });

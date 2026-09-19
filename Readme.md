@@ -285,7 +285,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              422 tests, including EVM cross-checks
+test/                              424 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -330,7 +330,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test           # 422 tests
+npm test           # 424 tests
 npm run abi        # regenerate js/contract-abi.js after changing the contract
 npm run kdf-docs   # rewrite the key-derivation numbers in the docs from js/core/kdf.js
 npm run test-count # rewrite the counts above from a real run of the suite

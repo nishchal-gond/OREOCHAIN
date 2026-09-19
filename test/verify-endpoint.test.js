@@ -30,12 +30,26 @@ const CONTRACT = "0x" + "c0".repeat(20);
 const silent = createLogger({ level: "silent" });
 
 /** A chain that says exactly what a test tells it to. */
-function stubChain({ batches = new Map(), documents = new Map(), head = 100, fail = null } = {}) {
+function stubChain({
+  batches = new Map(),
+  documents = new Map(),
+  head = 100,
+  fail = null,
+  chainId = 31337,
+} = {}) {
   let reads = 0;
   return {
     reads: () => reads,
     contractAddress: CONTRACT,
-    chainId: async () => 31337,
+    // Settable, because an RPC endpoint can come to point at a different
+    // network under a running process: DNS, a failover, an edited URL.
+    setChainId: (value) => {
+      chainId = value;
+    },
+    chainId: async () => {
+      if (fail) throw new Error(fail);
+      return chainId;
+    },
     blockNumber: async () => {
       if (fail) throw new Error(fail);
       return head;
@@ -361,6 +375,99 @@ test("public verification is metered separately and much more tightly", async ()
       headers: { Authorization: `Bearer ${KEY}` },
     });
     assert.equal(status.status, 200);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a chain that disagrees is disputed even when the other path checked out", async () => {
+  /*
+   * The finding this covers: a valid batch anchor alongside a registration
+   * naming a different Merkle root used to come back "verified", with the
+   * disagreement demoted to a warning nobody reads. The two records are not
+   * describing the same file, and "anchored" is not a useful thing to say
+   * about it, whichever half happened to check out.
+   */
+  const chain = stubChain();
+  const gw = await startGateway({ reader: chain });
+  try {
+    const { document, root } = await recorded(gw);
+
+    chain.findBatch = async () => ({ block: 90, size: 1, txHash: "0x" + "11".repeat(32) });
+    chain.findDocument = async () => ({
+      block: 60,
+      timestamp: 1,
+      merkleRoot: "0x" + "77".repeat(32), // not the root we receipted
+      manifestCID: document.manifestCID,
+      totalChunks: 1,
+      fileSize: document.fileSize,
+      encrypted: true,
+      exporter: "0x" + "ee".repeat(20),
+    });
+
+    const body = await (await verify(gw, document.fileHash)).json();
+
+    assert.equal(body.gatewayClaim.verified, false, "a disagreement outranks a confirmation");
+    assert.equal(body.gatewayClaim.status, "disputed");
+    assert.match(body.gatewayClaim.warnings.join(" "), /different Merkle root/);
+
+    // And the sentence a person reads says so, rather than opening with
+    // "This document is anchored".
+    assert.match(body.gatewayClaim.explain, /disagrees/);
+    assert.doesNotMatch(body.gatewayClaim.explain, /^This document is anchored/);
+
+    // The batch really did check out; that is what makes this worth testing.
+    assert.equal(body.batch.root, root);
+    assert.equal(body.batch.onChain.block, 90);
+    assert.deepEqual(body.gatewayClaim.anchoredBy, ["batch"]);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a cached anchor cannot outlive the network it was read from", async () => {
+  /*
+   * An anchor is immutable on the chain that holds it and means nothing on
+   * any other. When an RPC endpoint comes to point somewhere else, a cache
+   * keyed on the root alone keeps answering from the old network's data for
+   * the rest of its lifetime — while the response says it read the new one.
+   */
+  const chain = stubChain({ chainId: 1 });
+  const gw = await startGateway({ reader: chain });
+  try {
+    const { document } = await recorded(gw);
+
+    let reads = 0;
+    chain.findBatch = async () => {
+      reads++;
+      // Only the first network has ever held this root.
+      return (await chain.chainId()) === 1
+        ? { block: 90, size: 1, txHash: "0x" + "11".repeat(32) }
+        : null;
+    };
+
+    const first = await (await verify(gw, document.fileHash)).json();
+    assert.equal(first.gatewayClaim.verified, true);
+    assert.equal(first.chainRead.chainId, 1);
+    assert.equal(reads, 1);
+
+    // The endpoint now answers for a different network entirely.
+    chain.setChainId(999);
+
+    const second = await (await verify(gw, document.fileHash)).json();
+    assert.equal(reads, 2, "a different network is a cache miss, not a hit");
+    assert.equal(second.gatewayClaim.verified, false);
+    assert.equal(second.gatewayClaim.status, "not-anchored");
+
+    // The two halves of the answer agree: this is what was read, and it is
+    // the network the answer came from.
+    assert.equal(second.chainRead.chainId, 999);
+
+    // Going back finds the original answer still valid for that network.
+    chain.setChainId(1);
+    const third = await (await verify(gw, document.fileHash)).json();
+    assert.equal(third.gatewayClaim.verified, true);
+    assert.equal(third.chainRead.chainId, 1);
   } finally {
     await gw.stop();
   }
