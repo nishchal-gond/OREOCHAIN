@@ -180,6 +180,17 @@ export function loadConfig(env = process.env) {
     logLevel: readLevel(env, "OREOCHAIN_LOG_LEVEL", "info"),
 
     /**
+     * Check a document against its manifest before signing a receipt for it.
+     *
+     * On by default, because a receipt that says "this service accepted this
+     * exact document" while having checked nothing is worse than no receipt:
+     * it carries a valid signature over an unverified claim. Turning it off
+     * trades that guarantee for not depending on a manifest read at record
+     * time, and the process says so at startup.
+     */
+    verifyManifests: env.OREOCHAIN_VERIFY_MANIFESTS !== "false",
+
+    /**
      * How long to keep serving after SIGTERM before the listener closes.
      *
      * Readiness is only useful if something gets to observe it. An

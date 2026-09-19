@@ -20,7 +20,8 @@ import { createLogger } from "../server/log.mjs";
 import { equalBytes, fromUtf8, randomBytes, utf8 } from "../js/core/bytes.js";
 import { createPinataAdapter, putAll } from "../js/storage/ipfs.js";
 import { createProofService, readSigningKey } from "../server/proofs.mjs";
-import { importPublicKey, verifyReceipt } from "../js/core/receipt.js";
+import { createManifestVerifier } from "../server/verify.mjs";
+import { generateSigningKey, importPublicKey, verifyReceipt } from "../js/core/receipt.js";
 import { verifyInBatch } from "../js/core/anchor.js";
 import { openManifest, packFile, restoreFile, sealManifest } from "../js/core/manifest.js";
 
@@ -723,6 +724,92 @@ test("the log line for a request carries its id and no credential", async () => 
     assert.equal(pinned.reqId, "trace-9");
     assert.equal(pinned.bytes, 3);
     assert.equal(lines.join("\n").includes(KEY), false, "an api key reached the log");
+  } finally {
+    await gw.stop();
+  }
+});
+
+// ------------------------------------------- receipts mean what they say
+
+test("the record route refuses a document its manifest does not describe", async () => {
+  const payload = utf8("a genuine document");
+  const packed = await packFile(payload, {
+    fileName: "genuine.txt",
+    mimeType: "text/plain",
+    limits: TEST_LIMITS,
+  });
+  const manifest = await sealManifest(
+    packed,
+    packed.chunks.map((_, i) => `bafyChunk${i}`)
+  );
+
+  // Pin the manifest through the gateway, exactly as a client would, so the
+  // verifier reads it back through the same backend.
+  const backend = createMemoryBackend();
+  const manifestCID = await backend.put(utf8(JSON.stringify(manifest)), "manifest");
+
+  const keys = await generateSigningKey();
+  const proofs = await createProofService({
+    ...keys.exported,
+    verifier: createManifestVerifier({ backend, limits: TEST_LIMITS }),
+  });
+
+  const gw = await startGateway({}, { backend, proofs });
+  try {
+    const honest = {
+      fileHash: manifest.fileHash,
+      merkleRoot: manifest.merkleRoot,
+      fileSize: manifest.fileSize,
+      manifestCID,
+    };
+
+    const accepted = await fetch(`${gw.url}/api/proofs/record`, {
+      method: "POST",
+      headers: authed({ "Content-Type": "application/json" }),
+      body: JSON.stringify(honest),
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal((await accepted.json()).receipt.statement.verified, true);
+
+    // The same manifest, a different claimed document. This is the request
+    // that used to come back with a valid signature over a fiction.
+    const forged = await fetch(`${gw.url}/api/proofs/record`, {
+      method: "POST",
+      headers: authed({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ ...honest, fileHash: `0x${"aa".repeat(32)}` }),
+    });
+    assert.equal(forged.status, 400);
+    assert.match((await forged.json()).error, /does not match manifest/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a manifest the gateway cannot read is a retryable 503, not a rejection", async () => {
+  const keys = await generateSigningKey();
+  const backend = createMemoryBackend();
+  const proofs = await createProofService({
+    ...keys.exported,
+    verifier: createManifestVerifier({ backend, limits: TEST_LIMITS }),
+  });
+
+  const gw = await startGateway({}, { backend, proofs });
+  try {
+    // Nothing was pinned, so the manifest cannot be fetched. That is not the
+    // client's document being wrong, and telling them so would be misleading.
+    const response = await fetch(`${gw.url}/api/proofs/record`, {
+      method: "POST",
+      headers: authed({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        fileHash: `0x${"bb".repeat(32)}`,
+        merkleRoot: `0x${"cc".repeat(32)}`,
+        fileSize: 10,
+        manifestCID: "bafyNeverPinned",
+      }),
+    });
+
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("retry-after"), "5");
   } finally {
     await gw.stop();
   }
