@@ -365,6 +365,14 @@ window.addEventListener("load", async () => {
   window.hasWallet = wallet;
   chainNotice(wallet, Boolean(web3));
 
+  /*
+   * A page can stop needing a wallet part-way through. On the upload page the
+   * user picks how their document reaches the chain, and only one of the two
+   * choices signs anything — so the notice has to be re-asked rather than
+   * decided once at load and left wrong for whichever choice they make next.
+   */
+  window.oreochainRefreshChainNotice = () => chainNotice(wallet, Boolean(web3));
+
   // Signing in is a wallet affair. Without one there is nobody to sign in as,
   // but the page can still read the chain, so it carries on rather than
   // returning here as it used to.

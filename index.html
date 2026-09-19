@@ -115,17 +115,14 @@
           </div>
           <div class="col-lg-4 text-center p-5" data-aos="zoom-in">
             <img src="files/undraw_investment_data_re_sh9x.svg" width="150" alt="" />
-            <h4 class="py-3">
-              No wallet, no gas
-              <small class="text-warning d-block">being connected</small>
-            </h4>
+            <h4 class="py-3">No wallet, no gas</h4>
             <p class="para-light">
               A signed receipt the moment your file is stored, with thousands of
               documents then anchored together in
               <span class="text-warning">one transaction</span>, so per-document
-              cost falls as the platform grows. The gateway issues and batches
-              these now; until the app uses them, an upload here registers one
-              document from your own wallet.
+              cost falls as the platform grows. This is what an upload does
+              unless you ask for something else; registering from your own
+              wallet is still there as a choice.
             </p>
           </div>
           <div class="col-lg-4 text-center p-5" data-aos="zoom-in">
@@ -226,7 +223,7 @@
                   </div>
                   <div class="col-6">
                     <i class="fas fa-vial fa-2x"></i>
-                    <h2>420</h2>
+                    <h2>457</h2>
                     <p>AUTOMATED TESTS, INCLUDING ADVERSARIAL ONES</p>
                   </div>
                 </div>
@@ -270,12 +267,17 @@
               rising with it.
             </p>
             <p class="para-light">
-              <span class="text-warning">Where this stands today:</span> the
-              gateway issues receipts and builds batches, and this app does not
-              yet ask it to &mdash; uploading from here still registers one
-              document per transaction from your own wallet. Connecting the two
-              is in progress, and the wallet route stays afterwards for anyone
-              who wants no party between them and the chain.
+              Your browser checks both halves itself. The receipt's signature
+              is verified against the key that signed it, and once the batch is
+              anchored the inclusion proof is checked against a batch root read
+              from the chain &mdash; never against the root the service
+              supplied with it. A service that receipted one document and
+              anchored another is caught by that comparison, in your tab.
+            </p>
+            <p class="para-light">
+              Registering from your own wallet is still offered on the upload
+              page, for anyone who wants no party at all between them and the
+              chain.
             </p>
           </div>
           <div class="col-lg-5 text-center" data-aos="zoom-in">
