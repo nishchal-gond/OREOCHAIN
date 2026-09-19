@@ -269,6 +269,54 @@ directory the frontend needs, add it to `STATIC_DIRECTORIES` in
    several gateways today, give each its own store on storage it does not
    share. Running them against *one* store needs a backend that supports
    concurrent writers.
+
+   Two things worth knowing before you meet them:
+
+   - **After a crash, a restart can be refused for up to ten seconds.** The
+     holder refreshes a heartbeat in its lock file, and a process that starts
+     on the same pid — ordinary in containers, where every process tree starts
+     at pid 1 — cannot tell itself apart from a predecessor that is still
+     running. Rather than guess, it refuses and says how long to wait:
+     `…retry in 7s`. Under a restart policy the container comes up by itself a
+     restart or two later. It is a refusal with a countdown in it, not a hang,
+     and nothing has to be cleaned up by hand.
+   - **A holder that stalls past the lease and then resumes can collide with
+     its successor.** If a process is frozen long enough for the lease to
+     expire — a stop-the-world pause, a suspended VM — a second process takes
+     the lock legitimately, and when the first resumes its next heartbeat
+     writes over the new lock file. Both then believe they hold it. This is
+     inherent to a timestamp lease: `flock` would close it, but `flock` is
+     least trustworthy on exactly the shared volumes where this matters, so
+     the narrow race is documented rather than traded for a platform
+     dependency. Avoid it the same way you avoid the rest of this: one
+     instance, on storage it does not share.
+
+   **Moving the gateway to another node needs a person.** The lock records the
+   host that took it, and a lock from a *different* host is never taken over,
+   however stale it looks: from inside a container there is no way to tell a
+   node that has failed from a node that is merely unreachable, and guessing
+   wrong means two live writers on one file — the failure this whole mechanism
+   exists to prevent, arrived at automatically. So a gateway starting on a new
+   node against the old node's store refuses and names the holder:
+
+   ```
+   /data/oreochain-proofs.log is held by host "node-a" (pid 1, since
+   2026-09-19T08:14:02.119Z). This store has a single writer: …
+   ```
+
+   To move it deliberately:
+
+   1. **Confirm the old instance is really gone** — stopped, or its node
+      genuinely down. Not "probably".
+   2. `rm /data/oreochain-proofs.log.lock` (the lock file sits beside the
+      store, with `.lock` appended).
+   3. Start the gateway on the new node. It takes the lock and replays the
+      log.
+
+   Do not automate step 2. A liveness probe that deletes the lock file turns a
+   network partition into two writers, which is exactly the trade this design
+   refuses to make. If you need failover without a person in it, that is the
+   point at which the store moves to Postgres behind the same interface.
 10. **Put `OREOCHAIN_DB_PATH` on persistent storage and back it up.** It holds
    every recorded document and the ordered document list behind every anchored
    batch. That order is the only thing that can prove a document belongs to a
