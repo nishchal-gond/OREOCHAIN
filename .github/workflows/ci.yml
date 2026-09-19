@@ -68,6 +68,26 @@ jobs:
             exit 1
           fi
 
+  verify-test-count:
+    name: Readme test count is current
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # The Readme states the size of the suite in two places. It went stale
+      # three times running because the prose was written before the merge that
+      # added the tests, so the number is generated from a real run now.
+      - name: Check the counts against a real run
+        run: npm run test-count -- --check
+
   no-secrets:
     name: No credentials in source
     runs-on: ubuntu-latest
