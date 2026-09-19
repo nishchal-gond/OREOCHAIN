@@ -403,6 +403,21 @@ its address is not an authorised exporter, or if the address holds no balance �
 each of which would otherwise show up only as a stream of reverted
 transactions you paid gas for.
 
+### Trying it before it costs anything
+
+There is no local chain in this repository, so the first anchor you send goes
+to a real one. Send it to a testnet: deploy the contract there, fund the
+anchoring address from that network's faucet, authorise it, and run the worker
+against it end to end. Everything behaves identically — the same contract, the
+same confirmations, the same failure messages — and a mistake costs test
+currency.
+
+Worth doing at least once before the mainnet or L2 deployment, because the two
+failures most likely to be waiting (the address was never authorised, or the
+contract address and the RPC endpoint are for different networks) are both
+caught by the worker's preflight on the first run rather than by a support
+request three weeks later.
+
 ### How a tick works
 
 1. Ask the gateway what is unanchored. Anchor those first, oldest first.
