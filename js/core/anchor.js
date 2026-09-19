@@ -201,15 +201,35 @@ export async function proveWholeBatch(batch) {
  * to do with the document it claims to describe.
  */
 export async function verifyInBatch(inclusion, onChainBatchRoot) {
-  const expectedRoot = (onChainBatchRoot || inclusion.batchRoot).toLowerCase();
+  // "This proof is invalid" is an answer a caller displays, not an exception it
+  // handles, and every input here came from whoever served the proof — so a
+  // malformed step, an over-long path or a bad hex digit is a reason, not a
+  // throw.
+  let expectedRoot;
+  let ok;
+  try {
+    if (inclusion === null || typeof inclusion !== "object") {
+      throw new Error("inclusion proof must be an object");
+    }
+    expectedRoot = (onChainBatchRoot || inclusion.batchRoot || "").toLowerCase();
+    if (!HEX32.test(expectedRoot)) {
+      throw new Error("batch root must be 0x-prefixed 32-byte hex");
+    }
+    if (!Array.isArray(inclusion.proof)) throw new Error("inclusion proof is missing its path");
 
-  const leaf = await documentLeaf(inclusion.document);
+    const leaf = await documentLeaf(inclusion.document);
 
-  const ok = await verifyMerkleProof(
-    leaf,
-    inclusion.proof.map((step) => ({ hash: fromHex(step.hash), side: step.side })),
-    fromHex(expectedRoot)
-  );
+    ok = await verifyMerkleProof(
+      leaf,
+      inclusion.proof.map((step) => ({
+        hash: fromHex(step && step.hash),
+        side: step && step.side,
+      })),
+      fromHex(expectedRoot)
+    );
+  } catch (error) {
+    return { valid: false, reason: error.message };
+  }
 
   if (!ok) return { valid: false, reason: "inclusion proof does not reach the batch root" };
   if (inclusion.document.fileHash !== inclusion.fileHash) {
@@ -230,13 +250,18 @@ export async function verifyInBatch(inclusion, onChainBatchRoot) {
 export function createBatchQueue({ maxSize = 1000, maxAgeMs = 3600000, now = () => Date.now() } = {}) {
   let pending = [];
   let oldest = null;
+  // A membership set beside the array: scanning `pending` on every add made
+  // filling a queue quadratic, which at MAX_BATCH_SIZE is two billion string
+  // comparisons on the request path.
+  const queued = new Set();
 
   return {
     add(document) {
       if (pending.length >= MAX_BATCH_SIZE) throw new Error("batch queue is full");
-      if (pending.some((entry) => entry.fileHash === document.fileHash)) return { queued: false, reason: "duplicate" };
+      if (queued.has(document.fileHash)) return { queued: false, reason: "duplicate" };
 
       pending.push(document);
+      queued.add(document.fileHash);
       if (oldest === null) oldest = now();
       return { queued: true, pending: pending.length };
     },
@@ -259,6 +284,7 @@ export function createBatchQueue({ maxSize = 1000, maxAgeMs = 3600000, now = () 
     drain(count = pending.length) {
       const taken = pending.slice(0, count);
       pending = pending.slice(count);
+      for (const entry of taken) queued.delete(entry.fileHash);
       // Anything left was queued while the batch was being built, so its real
       // age is at most one build. Restarting the clock is a few seconds of
       // optimism, not a missed flush.
