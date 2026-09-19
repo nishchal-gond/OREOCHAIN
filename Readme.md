@@ -104,11 +104,11 @@ The passphrase step is memory-hard on purpose. The wrapped file key travels in
 the manifest, so anyone who fetches one can guess passphrases offline at
 hardware speed — the cost of a single guess is the whole defence, and it is the
 parameter an attacker cannot buy their way around. Argon2id forces every guess
-to allocate and traverse 64 MB twice over, which is exactly what a GPU or ASIC
+to allocate and traverse <!-- kdf:memory -->64 MiB twice over<!-- /kdf:memory -->, which is exactly what a GPU or ASIC
 cannot cheaply multiply. PBKDF2, which needs almost no memory, remains readable
 so files sealed before this change still open.
 
-That derivation runs in a dedicated worker, so the ~2.2s it costs does not
+That derivation runs in a dedicated worker, so the <!-- kdf:cost -->~2.2s<!-- /kdf:cost --> it costs does not
 freeze the page. Where no worker is available it falls back to the calling
 thread — slower and visibly so, but still correct.
 
@@ -283,7 +283,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              247 tests, including EVM cross-checks
+test/                              252 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -328,8 +328,9 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test     # 247 tests
-npm run abi  # regenerate js/contract-abi.js after changing the contract
+npm test          # 252 tests
+npm run abi       # regenerate js/contract-abi.js after changing the contract
+npm run kdf-docs  # rewrite the key-derivation numbers in the docs from js/core/kdf.js
 ```
 
 Coverage includes the RFC 9106 known-answer vector for Argon2id, the derivation

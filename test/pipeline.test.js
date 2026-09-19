@@ -12,9 +12,10 @@ import {
 } from "../js/core/manifest.js";
 import { splitIntoChunks } from "../js/core/chunker.js";
 
-// Argon2id at production settings costs ~2.2s per derivation, which would make
-// this suite take minutes. Tests declare cheap parameters explicitly, and a
-// matching floor, rather than silently inheriting defaults.
+// Argon2id at production settings costs seconds per derivation — see
+// ARGON2ID_PROFILE in js/core/kdf.js for the figure, which is not repeated here
+// — and that would make this suite take minutes. Tests declare cheap parameters
+// explicitly, and a matching floor, rather than silently inheriting defaults.
 const TEST_KDF = { name: "argon2id", memoryKiB: 8, iterations: 1, parallelism: 1 };
 
 const PASSPHRASE = "a-long-enough-test-passphrase";

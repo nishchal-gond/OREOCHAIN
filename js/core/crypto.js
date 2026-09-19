@@ -27,7 +27,7 @@
 
 import { concat, randomBytes, utf8, webcrypto } from "./bytes.js";
 import { DEFAULT_SUITE, getSuite } from "./suites.js";
-import { DEFAULT_KDF, deriveKeyEncryptionKey, kdfSpec } from "./kdf.js";
+import { DEFAULT_KDF, deriveKeyEncryptionKey, kdfSpec, PBKDF2_DEFAULTS } from "./kdf.js";
 
 // Re-exported so callers have one import for the passphrase path.
 export { deriveKeyEncryptionKey, kdfSpec, DEFAULT_KDF };
@@ -35,7 +35,7 @@ export { deriveKeyEncryptionKey, kdfSpec, DEFAULT_KDF };
 export const ENVELOPE_VERSION = "oreochain-envelope-v1";
 
 /** Kept for callers that still name PBKDF2 explicitly; see js/core/kdf.js. */
-export const DEFAULT_PBKDF2_ITERATIONS = 600000;
+export const DEFAULT_PBKDF2_ITERATIONS = PBKDF2_DEFAULTS.iterations;
 
 const KEY_BITS = 256;
 const IV_BYTES = 12; // 96-bit nonce, the size AES-GCM is specified for
