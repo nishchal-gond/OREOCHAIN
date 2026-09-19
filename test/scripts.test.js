@@ -9,6 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { createRequire } from "node:module";
 
@@ -111,5 +112,28 @@ test("both scripts exist, are executable, and refuse a bare invocation", () => {
     const file = path.join(ROOT, "scripts", name);
     assert.ok(fs.existsSync(file), `${name} is missing`);
     assert.ok(fs.statSync(file).mode & 0o111, `${name} is not executable`);
+
+    /*
+     * Actually run it. Asserting on the exported helpers leaves the case an
+     * operator meets first — a bare invocation with nothing configured —
+     * covered by nothing, and a script that threw on startup or, worse, got
+     * far enough to send something would still pass a check of the file's
+     * mode. An empty environment rather than a filtered one, so a variable
+     * set on the machine running the tests cannot make this pass.
+     */
+    const run = spawnSync(process.execPath, [file], {
+      cwd: ROOT,
+      env: { PATH: process.env.PATH },
+      encoding: "utf8",
+    });
+
+    assert.equal(run.status, 1, `${name} should exit 1 with nothing configured`);
+    assert.match(
+      run.stderr,
+      /setting\(s\) are missing/,
+      `${name} should name what is missing`
+    );
+    assert.match(run.stderr, /OREOCHAIN_CHAIN_RPC/);
+    assert.match(run.stderr, /OREOCHAIN_DEPLOY_KEY/);
   }
 });
