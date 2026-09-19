@@ -59,6 +59,7 @@ intend.
 | `PINATA_JWT` | — | Pinning credential. Never leaves this process. |
 | `OREOCHAIN_STORAGE` | `pinata` | `memory` for local testing |
 | `OREOCHAIN_MAX_CHUNK_BYTES` | `1048576` | Hard cap per request body |
+| `OREOCHAIN_MAX_CONCURRENT_UPLOADS` | `32` | Request bodies buffered at once, process-wide. Past this, 503. |
 | `OREOCHAIN_RATE_LIMIT_PER_MINUTE` | `600` | Sustained rate per key |
 | `OREOCHAIN_RATE_LIMIT_BURST` | `120` | Burst allowance per key |
 | `OREOCHAIN_ALLOWED_ORIGINS` | none | Browser origins permitted via CORS. `*` is refused. |
@@ -204,3 +205,4 @@ Honest list, so nobody assumes otherwise:
   a funded key has to send the transaction.
 - **No key rotation without a restart.** Keys are read once at startup.
 - **No upload deduplication.** The same chunk pinned twice is pinned twice.
+  (A document recorded twice is now deduplicated; chunks are not.)

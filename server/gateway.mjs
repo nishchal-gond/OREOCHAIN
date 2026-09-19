@@ -290,6 +290,16 @@ export function createHandler(config, backend, deps = {}) {
 
   const log = deps.log || ((entry) => console.log(JSON.stringify(entry)));
 
+  /*
+   * Bodies buffered right now, process-wide. The per-request cap bounds one
+   * body; this bounds how many exist at once. Rate limiting cannot do it —
+   * a burst of tokens spends in parallel — so without this one client within
+   * its limit could hold hundreds of megabytes, or gigabytes at a raised
+   * chunk cap.
+   */
+  let inFlightUploads = 0;
+  const maxConcurrentUploads = deps.maxConcurrentUploads ?? config.maxConcurrentUploads ?? 32;
+
   // Idle rate-limit buckets are swept periodically so memory stays bounded.
   const sweeper = deps.sweeper === false ? null : setInterval(() => limiter.sweep(), 600000);
   if (sweeper && typeof sweeper.unref === "function") sweeper.unref();
@@ -315,7 +325,12 @@ export function createHandler(config, backend, deps = {}) {
 
     try {
       if (url.pathname === "/health" && req.method === "GET") {
-        sendJson(res, 200, { status: "ok", storage: backend.name, uptime: process.uptime() });
+        sendJson(res, 200, {
+          status: "ok",
+          storage: backend.name,
+          uptime: process.uptime(),
+          inFlightUploads,
+        });
         return;
       }
 
@@ -378,24 +393,39 @@ export function createHandler(config, backend, deps = {}) {
         }
 
         if (url.pathname === "/api/storage/pin" && req.method === "POST") {
-          const body = await readBody(req, {
-            maxBytes: config.maxChunkBytes,
-            timeoutMs: config.readTimeoutMs,
-          });
-          if (body.length === 0) {
-            sendJson(res, 400, { error: "empty body" });
+          if (inFlightUploads >= maxConcurrentUploads) {
+            // Shed load rather than run the host out of memory. A client that
+            // retries — which the browser adapter does, with backoff — sees a
+            // brief slowdown instead of a dead gateway.
+            res.setHeader("Retry-After", "1");
+            sendJson(res, 503, { error: "too many uploads in flight" }, { close: true });
+            log({ event: "shed", keyId: auth.keyId, inFlight: inFlightUploads });
             return;
           }
 
-          const cid = await backend.put(body, chunkName(req));
-          sendJson(res, 200, { cid });
-          log({
-            event: "pin",
-            keyId: auth.keyId,
-            bytes: body.length,
-            cid,
-            ms: Date.now() - started,
-          });
+          inFlightUploads++;
+          try {
+            const body = await readBody(req, {
+              maxBytes: config.maxChunkBytes,
+              timeoutMs: config.readTimeoutMs,
+            });
+            if (body.length === 0) {
+              sendJson(res, 400, { error: "empty body" });
+              return;
+            }
+
+            const cid = await backend.put(body, chunkName(req));
+            sendJson(res, 200, { cid });
+            log({
+              event: "pin",
+              keyId: auth.keyId,
+              bytes: body.length,
+              cid,
+              ms: Date.now() - started,
+            });
+          } finally {
+            inFlightUploads--;
+          }
           return;
         }
 

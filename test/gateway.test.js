@@ -43,7 +43,7 @@ function baseEnv(overrides = {}) {
 /** Start a gateway on an ephemeral port; returns its URL and a stop function. */
 async function startGateway(envOverrides = {}, deps = {}) {
   const config = assertSafeConfig(loadConfig(baseEnv(envOverrides)));
-  const backend = createMemoryBackend();
+  const backend = deps.backend || createMemoryBackend();
   const proofs = deps.proofs === false ? null : deps.proofs || (await createProofService());
   const handler = createHandler(config, backend, {
     log: () => {},
@@ -524,6 +524,65 @@ test("the allowlist is a prefix match on directories, not a substring match", ()
   // A sibling directory whose name merely starts with an allowed one.
   assert.equal(isServablePath("js-private/secrets.js"), false);
   assert.equal(isServablePath("cssx/leak.css"), false);
+});
+
+test("uploads past the concurrency limit are shed, not buffered", async () => {
+  // Hold every upload open so they pile up, which is the state the limit
+  // exists for: the per-request cap bounds one body, not how many are live.
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  const blocking = {
+    name: "memory",
+    async put() {
+      await held;
+      return "memoryHeld";
+    },
+    async get() {
+      throw Object.assign(new Error("not found"), { status: 404 });
+    },
+  };
+
+  const gw = await startGateway({}, { backend: blocking, maxConcurrentUploads: 2 });
+  try {
+    const send = () =>
+      fetch(`${gw.url}/api/storage/pin`, {
+        method: "POST",
+        headers: authed({ "Content-Type": "application/octet-stream" }),
+        body: new Uint8Array([1, 2, 3]),
+      });
+
+    const first = send();
+    const second = send();
+    // Give the two a moment to be counted before the third arrives.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const third = await send();
+
+    assert.equal(third.status, 503, "a third concurrent upload was accepted");
+    assert.equal(third.headers.get("retry-after"), "1");
+
+    release();
+    assert.equal((await first).status, 200);
+    assert.equal((await second).status, 200);
+
+    // The slot is returned, so the gateway recovers rather than staying shut.
+    assert.equal((await send()).status, 200, "the limit did not release");
+  } finally {
+    release();
+    await gw.stop();
+  }
+});
+
+test("health reports how many uploads are in flight", async () => {
+  const gw = await startGateway();
+  try {
+    const body = await (await fetch(`${gw.url}/health`)).json();
+    assert.equal(body.inFlightUploads, 0);
+  } finally {
+    await gw.stop();
+  }
 });
 
 test("an unknown endpoint is a 404", async () => {
