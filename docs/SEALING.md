@@ -110,13 +110,14 @@ default. The implementation is checked against the RFC 9106 §5.3 known-answer
 vector in `test/kdf.test.js`, because a subtly wrong KDF still produces
 plausible bytes and encrypts happily, with no symptom to notice.
 
-Derivation runs in `js/core/kdf-worker.js` so the page stays responsive. The
-worker is terminated after every request rather than pooled — it holds the
+Derivation runs in `js/core/kdf-worker.js` so the calling thread stays
+responsive — a browser `Worker` in the page, a `worker_threads` worker on Node.
+The worker is terminated after every request rather than pooled — it holds the
 passphrase and tens of megabytes of Argon2 state that cannot be scrubbed — and
-the derived key is transferred rather than copied. If no `Worker` exists or the
-script fails to load, derivation falls back to the calling thread; a worker that
-ran and failed, or timed out, propagates instead, since retrying inline would
-block for the same reason and fail identically.
+the derived key is transferred rather than copied. If no worker implementation
+exists or the script fails to load, derivation falls back to the calling thread;
+a worker that ran and failed, or timed out, propagates instead, since retrying
+inline would block for the same reason and fail identically.
 
 ### Bounds on parameters read from a manifest
 

@@ -256,9 +256,66 @@ export function setKdfWorkerFactory(factory) {
   injectedWorkerFactory = factory;
 }
 
+/**
+ * Node's worker_threads.Worker, when this module is running on Node and there
+ * is no browser Worker to use.
+ *
+ * Resolved once, at module load, because defaultWorkerFactory() has to be
+ * synchronous — deriveViaWorker() calls it and needs a worker back, not a
+ * promise. The import is reached only on Node, exactly as bytes.js resolves
+ * WebCrypto, so a browser never evaluates it.
+ */
+let nodeWorkerCtor = null;
+
+if (
+  typeof Worker === "undefined" &&
+  typeof process !== "undefined" &&
+  process.versions &&
+  process.versions.node
+) {
+  try {
+    nodeWorkerCtor = (await import("node:worker_threads")).Worker;
+  } catch {
+    // No worker_threads (an unusual build); derivation falls back to inline.
+  }
+}
+
+/**
+ * Adapt a Node worker to the browser Worker surface deriveViaWorker() uses.
+ *
+ * Node emits "message" and "error" events where a browser sets .onmessage and
+ * .onerror, and delivers the message value directly rather than wrapped in an
+ * event — which deriveViaWorker() already unwraps either way. unref() keeps a
+ * derivation from holding a CLI or a test runner open if it is ever abandoned.
+ */
+function adaptNodeWorker(worker) {
+  const adapter = {
+    onmessage: null,
+    onerror: null,
+    postMessage: (message) => worker.postMessage(message),
+    terminate: () => worker.terminate(),
+  };
+  worker.on("message", (data) => adapter.onmessage && adapter.onmessage(data));
+  worker.on("error", (error) => adapter.onerror && adapter.onerror(error));
+  worker.unref();
+  return adapter;
+}
+
+/**
+ * A worker to derive in, or null if this runtime has none.
+ *
+ * Returning null on Node was the whole story until now: `typeof Worker` is
+ * undefined there, so every server-side and CLI derivation fell back to running
+ * Argon2id inline — tens of megabytes and seconds of hashing on the thread that
+ * was meant to be serving other requests — even though kdf-worker.js has
+ * supported worker_threads all along and nothing but this function stood
+ * between them.
+ */
 function defaultWorkerFactory() {
-  if (typeof Worker === "undefined") return null; // Node, or no worker support
-  return new Worker(new URL("./kdf-worker.js", import.meta.url), { type: "module" });
+  const url = new URL("./kdf-worker.js", import.meta.url);
+  if (typeof Worker !== "undefined") return new Worker(url, { type: "module" });
+  if (nodeWorkerCtor) return adaptNodeWorker(new nodeWorkerCtor(url));
+  return null; // no worker support in this runtime
 }
 
 /**

@@ -108,8 +108,9 @@ to allocate and traverse <!-- kdf:memory -->64 MiB twice over<!-- /kdf:memory --
 cannot cheaply multiply. PBKDF2, which needs almost no memory, remains readable
 so files sealed before this change still open.
 
-That derivation runs in a dedicated worker, so the <!-- kdf:cost -->~2.2s<!-- /kdf:cost --> it costs does not
-freeze the page. Where no worker is available it falls back to the calling
+That derivation runs in a dedicated worker — a `Worker` in the browser, a
+`worker_threads` thread on Node — so the <!-- kdf:cost -->~2.2s<!-- /kdf:cost --> it costs does not
+freeze the page or stall a server. Where no worker is available it falls back to the calling
 thread — slower and visibly so, but still correct.
 
 Two properties follow that a single-key design cannot offer:
@@ -283,7 +284,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              252 tests, including EVM cross-checks
+test/                              358 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -328,7 +329,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test          # 252 tests
+npm test          # 358 tests
 npm run abi       # regenerate js/contract-abi.js after changing the contract
 npm run kdf-docs  # rewrite the key-derivation numbers in the docs from js/core/kdf.js
 ```
