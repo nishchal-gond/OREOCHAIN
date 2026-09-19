@@ -222,8 +222,59 @@ export function loadConfig(env = process.env) {
      * a little more than the readiness probe interval.
      */
     shutdownDelayMs: readInt(env, "OREOCHAIN_SHUTDOWN_DELAY_MS", 0, { min: 0, max: 120_000 }),
+
+    /**
+     * How many reverse proxies of your own sit in front of this process.
+     *
+     * Everything that meters a visitor is keyed on their address, so behind a
+     * proxy with this left at 0 every visitor shares one bucket and one of
+     * them can shut out the rest. Trusting `X-Forwarded-For` unconditionally
+     * is worse — anyone could then mint a fresh budget per request — so it is
+     * believed only as far as this says to believe it, and not at all by
+     * default.
+     */
+    trustedProxyHops: readInt(env, "OREOCHAIN_TRUSTED_PROXY_HOPS", 0, { min: 0, max: 10 }),
+
+    /**
+     * What one client may pin per window, and what the whole service may pin
+     * per day. Rate limiting bounds how often someone calls; these bound what
+     * it costs. Null is no limit, which anonymous mode refuses to start with.
+     */
+    clientBytesPerWindow: readOptionalInt(env, "OREOCHAIN_CLIENT_BYTES_PER_WINDOW"),
+    clientObjectsPerWindow: readOptionalInt(env, "OREOCHAIN_CLIENT_OBJECTS_PER_WINDOW"),
+    quotaWindowMs: readInt(env, "OREOCHAIN_QUOTA_WINDOW_MS", 3_600_000, { min: 1000 }),
+    dailyBytes: readOptionalInt(env, "OREOCHAIN_DAILY_BYTES"),
+    dailyObjects: readOptionalInt(env, "OREOCHAIN_DAILY_OBJECTS"),
   };
 }
+
+/** A limit that may simply not be set, as distinct from being set to zero. */
+function readOptionalInt(env, name) {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return null;
+
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer, got "${raw}"`);
+  }
+  return value;
+}
+
+/**
+ * Suggested starting points, printed when a required cap is missing.
+ *
+ * A 256 KiB chunk is the unit, so 256 MiB an hour is roughly a thousand
+ * chunks — a handful of large files — and 5 GiB a day is a public demo that
+ * cannot quietly become a hosting bill overnight. They are a place to start
+ * from, not a recommendation: the right numbers depend on what your pinning
+ * plan costs and how much of it you are willing to lose in a day.
+ */
+const SUGGESTED_CAPS = {
+  OREOCHAIN_CLIENT_BYTES_PER_WINDOW: { value: 268_435_456, as: "256 MiB per client per hour" },
+  OREOCHAIN_CLIENT_OBJECTS_PER_WINDOW: { value: 1024, as: "1024 objects per client per hour" },
+  OREOCHAIN_DAILY_BYTES: { value: 5_368_709_120, as: "5 GiB a day, everyone together" },
+  OREOCHAIN_DAILY_OBJECTS: { value: 20_000, as: "20000 objects a day, everyone together" },
+};
 
 /**
  * Configuration for the anchoring worker (server/anchor-worker.mjs).
@@ -351,11 +402,40 @@ export function assertSafeConfig(config, sink = { warn: (message) => console.war
         "so a wildcard origin would let any site spend your quota."
     );
   }
+  /*
+   * Anonymous access is a supported production configuration, not a
+   * development shortcut: the product's premise is that a visitor needs no
+   * account, and accounts are the wrong shape for that. What makes it safe is
+   * not authentication but a ceiling on what it can cost — so the ceiling is
+   * required, by name, rather than warned about and ignored.
+   */
   if (config.allowAnonymous && config.storage === "pinata") {
-    sink.warn(
-      "anonymous access is enabled and uploads are billed to your Pinata account: anyone " +
-        "who can reach this port can spend your quota"
-    );
+    const missing = Object.entries({
+      OREOCHAIN_CLIENT_BYTES_PER_WINDOW: config.clientBytesPerWindow,
+      OREOCHAIN_CLIENT_OBJECTS_PER_WINDOW: config.clientObjectsPerWindow,
+      OREOCHAIN_DAILY_BYTES: config.dailyBytes,
+      OREOCHAIN_DAILY_OBJECTS: config.dailyObjects,
+    }).filter(([, value]) => value === null);
+
+    if (missing.length > 0) {
+      throw new Error(
+        "anonymous access is enabled and uploads are billed to your pinning account, so " +
+          `every visitor needs a ceiling. ${missing.length} are unset. A place to start:\n` +
+          missing
+            .map(([name]) => `  ${name}=${SUGGESTED_CAPS[name].value}   # ${SUGGESTED_CAPS[name].as}`)
+            .join("\n") +
+          "\nPick numbers you could afford to lose in a day; see server/README.md."
+      );
+    }
+
+    if (config.trustedProxyHops === 0) {
+      sink.warn(
+        "anonymous access is enabled with OREOCHAIN_TRUSTED_PROXY_HOPS=0, so per-client " +
+          "caps are per *connecting address*. That is correct only if clients reach this " +
+          "process directly. Behind a reverse proxy or load balancer every visitor shares " +
+          "one budget, and the first heavy one shuts out the rest."
+      );
+    }
   }
   if (config.dbPath === ":memory:") {
     sink.warn(
