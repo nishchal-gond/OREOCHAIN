@@ -197,6 +197,117 @@ export function loadConfig(env = process.env) {
 }
 
 /**
+ * Configuration for the anchoring worker (server/anchor-worker.mjs).
+ *
+ * Separate from the gateway's because the two processes are deliberately
+ * unalike: this one holds a key that can spend and never accepts a request,
+ * and the gateway is the other way round. Sharing one config object would mean
+ * every gateway also had the anchoring key in its environment.
+ *
+ * Everything the worker cannot work without is required here rather than
+ * defaulted, so an incomplete deployment fails on the first line of output
+ * instead of running for a week without anchoring anything.
+ */
+export function loadAnchorConfig(env = process.env) {
+  const missing = [];
+  const need = (name, value, hint) => {
+    if (!value) missing.push(`${name} — ${hint}`);
+    return value;
+  };
+
+  const rpcUrl = need(
+    "OREOCHAIN_CHAIN_RPC",
+    env.OREOCHAIN_CHAIN_RPC,
+    "the JSON-RPC endpoint to submit anchors through"
+  );
+  const contractAddress = need(
+    "OREOCHAIN_CONTRACT_ADDRESS",
+    env.OREOCHAIN_CONTRACT_ADDRESS,
+    "the deployed ChunkedVerification address"
+  );
+
+  /*
+   * The one setting most likely to be left unset, and the one whose absence
+   * used to be invisible: with no key nothing can be submitted, and a worker
+   * that starts anyway would poll for ever while receipts kept promising an
+   * anchor that was never coming.
+   */
+  const privateKey = need(
+    "OREOCHAIN_ANCHOR_KEY",
+    readSecret(env, "OREOCHAIN_ANCHOR_KEY"),
+    "the funded private key that signs anchor transactions (or OREOCHAIN_ANCHOR_KEY_FILE)"
+  );
+  const apiKey = need(
+    "OREOCHAIN_ANCHOR_API_KEY",
+    readSecret(env, "OREOCHAIN_ANCHOR_API_KEY"),
+    "an OREOCHAIN_API_KEYS entry the worker authenticates to the gateway with"
+  );
+
+  if (missing.length > 0) {
+    throw new Error(
+      `the anchoring worker cannot start, ${missing.length} setting(s) are missing:\n  ` +
+        missing.join("\n  ")
+    );
+  }
+
+  if (!/^0x[0-9a-fA-F]{40}$/.test(contractAddress)) {
+    throw new Error(
+      `OREOCHAIN_CONTRACT_ADDRESS must be a 20-byte hex address, got "${contractAddress}"`
+    );
+  }
+  // Checked by shape only, and never echoed: a key pasted with a stray newline
+  // or missing its 0x fails deep inside web3 with a message that does not say
+  // which setting is wrong.
+  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
+    throw new Error(
+      "OREOCHAIN_ANCHOR_KEY must be a 0x-prefixed 32-byte hex private key " +
+        `(got ${privateKey.length} characters)`
+    );
+  }
+
+  return {
+    rpcUrl,
+    contractAddress,
+    privateKey,
+
+    gatewayUrl: env.OREOCHAIN_GATEWAY_URL || "http://127.0.0.1:8787",
+    apiKey,
+
+    /** How often to look for work. Anchoring is periodic by design. */
+    intervalMs: readInt(env, "OREOCHAIN_ANCHOR_INTERVAL_MS", 60_000, { min: 1000 }),
+
+    /**
+     * Blocks to wait before recording an anchor as final.
+     *
+     * A receipt records the transaction a proof points at. Reporting one block
+     * deep means a reorg can leave every receipt in that batch pointing at a
+     * transaction that no longer exists, and a receipt is not something a user
+     * comes back to re-check. Three is a floor for a fast chain; a public L1
+     * wants more.
+     */
+    confirmations: readInt(env, "OREOCHAIN_ANCHOR_CONFIRMATIONS", 3, { min: 1, max: 1000 }),
+
+    /**
+     * How long to wait for a sent transaction to mine before sending another.
+     * The contract rejects a duplicate anchor, so the cost of being wrong here
+     * is one reverted transaction, not a second anchor.
+     */
+    pendingTimeoutMs: readInt(env, "OREOCHAIN_ANCHOR_PENDING_TIMEOUT_MS", 600_000, {
+      min: 10_000,
+    }),
+
+    /**
+     * Written into the anchor as where this batch's inclusion proofs live.
+     * "{root}" is substituted. Empty means the anchor carries no pointer,
+     * which is valid but leaves a verifier nothing to follow.
+     */
+    uriTemplate: env.OREOCHAIN_ANCHOR_URI || "",
+
+    logLevel: readLevel(env, "OREOCHAIN_LOG_LEVEL", "info"),
+  };
+}
+
+/**
  * Refuse settings that are unsafe, and warn about settings that are merely
  * dangerous.
  *

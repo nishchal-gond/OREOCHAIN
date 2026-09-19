@@ -182,9 +182,42 @@ export async function createProofService(options = {}) {
       };
     },
 
-    /** Note where a batch root landed on-chain, so verifiers can find it. */
+    /**
+     * Note where a batch root landed on-chain, so verifiers can find it.
+     *
+     * Validated rather than trusted: this now arrives over HTTP from the
+     * anchoring worker, and a malformed txHash written into the store would
+     * be served to every verifier asking about that batch, pointing them at a
+     * transaction that does not exist.
+     */
     recordAnchor(root, { txHash, block }) {
-      return store.anchorBatch(root, { txHash, block });
+      if (typeof root !== "string" || !/^0x[0-9a-f]{64}$/.test(root.toLowerCase())) {
+        throw Object.assign(new Error("root must be 0x-prefixed 32-byte hex"), { status: 400 });
+      }
+      if (typeof txHash !== "string" || !/^0x[0-9a-f]{64}$/.test(txHash.toLowerCase())) {
+        throw Object.assign(new Error("txHash must be 0x-prefixed 32-byte hex"), { status: 400 });
+      }
+      if (!Number.isInteger(block) || block < 0) {
+        throw Object.assign(new Error("block must be a non-negative integer"), { status: 400 });
+      }
+
+      const known = store.findBatch(root.toLowerCase());
+      if (!known) {
+        throw Object.assign(new Error(`no batch ${root} to anchor`), { status: 404 });
+      }
+      if (known.txHash && known.txHash !== txHash.toLowerCase()) {
+        // Two different transactions for one root means something is wrong
+        // upstream; overwriting would hide it and break proofs already served.
+        throw Object.assign(
+          new Error(`batch ${root} is already anchored in ${known.txHash}`),
+          { status: 409 }
+        );
+      }
+
+      return store.anchorBatch(root.toLowerCase(), {
+        txHash: txHash.toLowerCase(),
+        block,
+      });
     },
 
     /** The inclusion proof a user needs to verify their document on-chain. */
@@ -208,6 +241,22 @@ export async function createProofService(options = {}) {
 
     listBatches() {
       return store.stats().batches;
+    },
+
+    /**
+     * Batches built but not yet seen on-chain, oldest first.
+     *
+     * This is how the anchoring worker recovers: it owns the funded key and
+     * the chain connection, but not the store, so after a crash between
+     * building a batch and submitting it the gateway is the only thing that
+     * knows the batch exists.
+     */
+    unanchoredBatches(limit) {
+      return store.unanchoredBatches(limit).map((batch) => ({
+        root: batch.root,
+        size: batch.size,
+        builtAt: batch.builtAt,
+      }));
     },
 
     close() {
