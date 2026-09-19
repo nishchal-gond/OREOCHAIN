@@ -37,7 +37,24 @@ async function main() {
   const backend = createBackend(config);
 
   const signingKey = readSigningKey();
-  const proofs = await createProofService({ ...signingKey, dbPath: config.dbPath });
+
+  let proofs;
+  try {
+    proofs = await createProofService({ ...signingKey, dbPath: config.dbPath });
+  } catch (error) {
+    /*
+     * Most likely a second instance pointed at one proof store. That is a
+     * configuration mistake with no safe degraded mode — starting anyway would
+     * interleave appends and leave anchored documents unprovable — so it is a
+     * refusal to start with the reason on one line, not a warning.
+     */
+    log.error("cannot open the proof store", {
+      dbPath: config.dbPath,
+      message: error.message,
+      holder: error.holder,
+    });
+    process.exit(1);
+  }
   if (proofs.ephemeral) {
     log.warn(
       "no OREOCHAIN_RECEIPT_KEY set: receipts are signed with a throwaway key, so every " +

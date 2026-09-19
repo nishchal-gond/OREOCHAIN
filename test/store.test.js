@@ -10,11 +10,19 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
 
-import { openStore, StoreError, STORE_VERSION } from "../server/store.mjs";
+import {
+  openStore,
+  StoreError,
+  StoreLockedError,
+  STORE_VERSION,
+  _internals as storeInternals,
+} from "../server/store.mjs";
 import { createProofService } from "../server/proofs.mjs";
 import { verifyInBatch } from "../js/core/anchor.js";
 import { generateSigningKey } from "../js/core/receipt.js";
@@ -274,4 +282,179 @@ test("proofs are derived, so the log stays a record of documents not paths", asy
   const log = readFileSync(file, "utf8");
   assert.ok(!log.includes('"side"'), "a proof path was written to the log");
   assert.ok(log.includes('"t":"batch"'));
+});
+
+// ------------------------------------------------------- one writer, or none
+
+test("a second store on the same file refuses to open", () => {
+  const file = path.join(tempDir(), "proofs.log");
+  const first = openStore({ path: file });
+
+  // Two appenders interleave their records and neither sees the other's, so a
+  // batch written by one names documents the other cannot produce. That is a
+  // proof that will not rebuild, discovered long after the root is on-chain.
+  assert.throws(() => openStore({ path: file }), StoreLockedError);
+
+  first.close();
+  // Released on close, so a restart is not blocked by its predecessor.
+  const second = openStore({ path: file });
+  second.close();
+});
+
+test("a lock from another host is refused, with no takeover", () => {
+  const file = path.join(tempDir(), "proofs.log");
+  const store = openStore({ path: file });
+  store.close();
+
+  // What a second Kubernetes replica leaves: a different pod name. There is no
+  // safe way to tell "that replica crashed" from "that replica is busy" across
+  // machines, so this never expires and never takes over.
+  writeFileSync(
+    `${path.resolve(file)}.lock`,
+    JSON.stringify({ host: "oreochain-gateway-7f9c-2", pid: 1, since: "2026-09-19T08:00:00Z" })
+  );
+
+  assert.throws(() => openStore({ path: file }), StoreLockedError);
+
+  // And it stays refused: no timeout, no second chance, however old the lock.
+  assert.throws(() => openStore({ path: file }), StoreLockedError);
+});
+
+test("the refusal names the other holder and what to do about it", () => {
+  const file = path.join(tempDir(), "proofs.log");
+  writeFileSync(
+    `${path.resolve(file)}.lock`,
+    JSON.stringify({ host: "gateway-replica-2", pid: 1, since: "2026-09-19T08:00:00Z" })
+  );
+
+  const error = (() => {
+    try {
+      openStore({ path: file });
+    } catch (e) {
+      return e;
+    }
+  })();
+
+  assert.ok(error instanceof StoreLockedError);
+  assert.match(error.message, /gateway-replica-2/);
+  assert.match(error.message, /single writer/);
+  assert.match(error.message, /OREOCHAIN_DB_PATH/);
+  assert.equal(error.holder.host, "gateway-replica-2");
+});
+
+test("a container restart takes over its own lock instead of refusing", () => {
+  const file = path.join(tempDir(), "proofs.log");
+
+  // A pod keeps its name across a container restart and the process is pid 1
+  // again, so the lock it left behind looks exactly like its own. Treating
+  // that as a conflict would refuse to start after every crash.
+  writeFileSync(
+    `${path.resolve(file)}.lock`,
+    JSON.stringify({
+      host: os.hostname(),
+      pid: process.pid,
+      since: "2026-09-19T08:00:00Z",
+    })
+  );
+
+  const store = openStore({ path: file });
+  store.recordDocument(doc(1), { signature: "s" });
+  store.close();
+});
+
+test("a lock left by a dead process on this host is taken over", () => {
+  const file = path.join(tempDir(), "proofs.log");
+
+  // A pid that has certainly exited: a child we just reaped.
+  const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(dead.status, 0);
+
+  writeFileSync(
+    `${path.resolve(file)}.lock`,
+    JSON.stringify({ host: os.hostname(), pid: dead.pid, since: "2026-09-19T08:00:00Z" })
+  );
+
+  const store = openStore({ path: file });
+  store.close();
+});
+
+test("a live process on this host holds the store against a second start", () => {
+  const file = path.join(tempDir(), "proofs.log");
+
+  // Our own parent is alive and is not us — the shape of someone running the
+  // gateway twice on one machine.
+  writeFileSync(
+    `${path.resolve(file)}.lock`,
+    JSON.stringify({ host: os.hostname(), pid: process.ppid, since: "2026-09-19T08:00:00Z" })
+  );
+
+  assert.throws(() => openStore({ path: file }), /already open by pid/);
+});
+
+test("an unreadable lock is refused rather than ignored", () => {
+  const file = path.join(tempDir(), "proofs.log");
+  writeFileSync(`${path.resolve(file)}.lock`, "not json at all");
+
+  // Something holds this store and we cannot tell what. Assuming it is safe is
+  // the one answer that risks the corruption the lock exists to prevent.
+  assert.throws(() => openStore({ path: file }), StoreLockedError);
+});
+
+test("a real second process is refused, not just a synthetic lock file", async () => {
+  const file = path.join(tempDir(), "proofs.log");
+  const held = openStore({ path: file });
+
+  // The lock is advisory and built on exclusive file creation, so what matters
+  // is whether a genuinely separate process is stopped. A fabricated lock file
+  // cannot show that.
+  const child = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      `import("${pathToFileURL(path.resolve("server/store.mjs")).href}")
+         .then((m) => { m.openStore({ path: ${JSON.stringify(file)} }); console.log("OPENED"); })
+         .catch((e) => { console.log(e.name); });`,
+    ],
+    { encoding: "utf8" }
+  );
+
+  assert.equal(child.stdout.trim(), "StoreLockedError", `child said: ${child.stdout}${child.stderr}`);
+  held.close();
+});
+
+test("the lock can be turned off where a caller knows it is alone", () => {
+  const file = path.join(tempDir(), "proofs.log");
+  const store = openStore({ path: file, lock: false });
+  store.close();
+  assert.equal(existsSync(`${path.resolve(file)}.lock`), false);
+});
+
+test("the /proc state parser survives an executable name full of punctuation", () => {
+  // comm is unescaped in /proc/<pid>/stat, so a process named "my (weird) app"
+  // puts parentheses and spaces inside the field. Splitting on whitespace
+  // reads the wrong character — and reading a live process as a zombie is the
+  // direction that matters: it would hand the store to a second writer.
+  const { parseProcState } = storeInternals;
+
+  assert.equal(parseProcState("123 (node) S 1 123 123 0 -1 4194304"), "S");
+  assert.equal(parseProcState("123 (my (weird) app) R 1 123"), "R");
+  assert.equal(parseProcState("123 (a b) c) Z 1 123"), "Z");
+  assert.equal(parseProcState("nonsense"), null);
+});
+
+test("a live process is never mistaken for a zombie", { skip: !existsSync("/proc") }, () => {
+  // This process is demonstrably running. A false "zombie" here is what would
+  // let a second replica take a held lock.
+  assert.equal(storeInternals.isZombie(process.pid), false);
+  assert.equal(storeInternals.isRunning(process.pid), true);
+});
+
+test("a pid that no longer exists is not running", () => {
+  const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+  assert.equal(dead.status, 0);
+  // spawnSync reaps, so this pid is fully gone rather than a zombie. A real
+  // zombie cannot be manufactured portably — every shell tried here reaps
+  // promptly — so the zombie path is covered by the parser tests above and was
+  // verified by hand against a killed gateway.
+  assert.equal(storeInternals.isRunning(dead.pid), false);
 });
