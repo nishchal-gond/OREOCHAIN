@@ -635,3 +635,156 @@ test("the anchoring key can come from a file, and never from both", () => {
     fs.rmSync(file, { force: true });
   }
 });
+
+// ------------------------------------------------------- the web3 adapter
+
+/**
+ * server/chain.mjs is the glue between the worker and web3. The contract
+ * behaviour it drives is covered above against a real EVM; what is left here
+ * is the glue itself, and it is tested against a stand-in for web3's surface
+ * rather than a live RPC endpoint.
+ *
+ * Said plainly: these tests prove the adapter does the right thing with what
+ * web3 v4 returns, not that web3 v4 returns it. The parts that would only
+ * show up against a real node — gas pricing, nonce handling, an RPC that
+ * disagrees with the docs — are not covered by anything here.
+ */
+function fakeWeb3({ code = "0x60", isExporter = true, balance = 10n ** 18n, found, onSend } = {}) {
+  const calls = [];
+
+  class FakeWeb3 {
+    constructor(rpcUrl) {
+      this.rpcUrl = rpcUrl;
+      this.eth = {
+        // web3 v4 hands back BigInt for every chain integer.
+        getChainId: async () => 31337n,
+        getBlockNumber: async () => 4321n,
+        getCode: async () => code,
+        getBalance: async () => balance,
+        accounts: {
+          privateKeyToAccount: (key) => ({ address: "0x" + "77".repeat(20), privateKey: key }),
+          wallet: { add: () => {} },
+        },
+        Contract: class {
+          constructor(abi, address) {
+            this.address = address;
+            this.methods = {
+              isExporter: () => ({ call: async () => isExporter }),
+              findBatch: (root) => ({ call: async () => found(root) }),
+              anchorBatch: (...args) => ({
+                estimateGas: async () => 120_000n,
+                send: (options) => {
+                  calls.push({ args, options });
+                  return onSend();
+                },
+              }),
+            };
+          }
+          async getPastEvents() {
+            return [{ transactionHash: "0x" + "7f".repeat(32) }];
+          }
+        },
+      };
+    }
+  }
+
+  return { module: { Web3: FakeWeb3 }, calls };
+}
+
+const CHAIN_BASE = {
+  rpcUrl: "http://127.0.0.1:8545",
+  contractAddress: "0x" + "ab".repeat(20),
+  privateKey: "0x" + "cd".repeat(32),
+  log: silent,
+};
+
+test("preflight names the misconfiguration rather than failing on-chain", async () => {
+  const { createChainClient } = await import("../server/chain.mjs");
+
+  const cases = [
+    [{ code: "0x" }, /no contract deployed at/],
+    [{ isExporter: false }, /is not an authorised exporter/],
+    [{ balance: 0n }, /holds no native balance/],
+  ];
+
+  for (const [overrides, expected] of cases) {
+    const fake = fakeWeb3({ found: () => ({ blockNumber: 0n }), onSend: () => {}, ...overrides });
+    const chain = await createChainClient({ ...CHAIN_BASE, web3Module: fake.module });
+    await assert.rejects(() => chain.preflight(), expected);
+  }
+
+  // The healthy case reports what it found, so the startup line says which
+  // chain and which address are actually in use.
+  const healthy = fakeWeb3({ found: () => ({ blockNumber: 0n }), onSend: () => {} });
+  const chain = await createChainClient({ ...CHAIN_BASE, web3Module: healthy.module });
+  assert.deepEqual(await chain.preflight(), {
+    chainId: 31337,
+    address: "0x" + "77".repeat(20),
+    balanceWei: String(10n ** 18n),
+  });
+});
+
+test("an unanchored root reads as null, an anchored one carries its transaction", async () => {
+  const { createChainClient } = await import("../server/chain.mjs");
+  const root = "0x" + "aa".repeat(32);
+
+  const missing = fakeWeb3({ found: () => ({ blockNumber: 0n, size: 0n }), onSend: () => {} });
+  const empty = await createChainClient({ ...CHAIN_BASE, web3Module: missing.module });
+  assert.equal(await empty.findBatch(root), null);
+
+  const present = fakeWeb3({ found: () => ({ blockNumber: 99n, size: 7n }), onSend: () => {} });
+  const chain = await createChainClient({ ...CHAIN_BASE, web3Module: present.module });
+  assert.deepEqual(await chain.findBatch(root), {
+    block: 99,
+    size: 7,
+    txHash: "0x" + "7f".repeat(32),
+  });
+
+  // Every one of these arrives as a BigInt and must not leak downstream,
+  // where it would throw the moment it met a number.
+  assert.equal(typeof (await chain.blockNumber()), "number");
+});
+
+test("anchorBatch returns on the transaction hash, not on the receipt", async () => {
+  const { createChainClient } = await import("../server/chain.mjs");
+
+  // A stand-in for web3's PromiEvent: a promise that also emits, and that
+  // settles long after the hash is known.
+  let settle;
+  const pending = new Promise((resolve, reject) => {
+    settle = { resolve, reject };
+  });
+  const listeners = new Map();
+  pending.once = (event, handler) => {
+    listeners.set(event, handler);
+    return pending;
+  };
+
+  const fake = fakeWeb3({
+    found: () => ({ blockNumber: 0n }),
+    onSend: () => {
+      setImmediate(() => listeners.get("transactionHash")?.("0x" + "8e".repeat(32)));
+      return pending;
+    },
+  });
+  const chain = await createChainClient({ ...CHAIN_BASE, web3Module: fake.module });
+
+  const submitted = await chain.anchorBatch({ root: "0x" + "bb".repeat(32), size: 3, uri: "u" });
+  assert.equal(submitted.txHash, "0x" + "8e".repeat(32), "resolved before the receipt");
+  assert.equal(fake.calls.length, 1);
+  // Estimate plus the 25% margin, as a string: web3 rejects a float.
+  assert.equal(fake.calls[0].options.gas, "150000");
+
+  /*
+   * The send promise outlives the call. A revert arriving later used to be an
+   * unhandled rejection, which by default takes the process down — losing a
+   * worker over a transaction whose outcome the next tick would have read off
+   * the contract anyway.
+   *
+   * This bites: remove the catch in server/chain.mjs and the test runner
+   * fails the file on the unhandled rejection.
+   */
+  settle.reject(new Error("reverted later"));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+});
