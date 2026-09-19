@@ -7,18 +7,24 @@
  * never holds a token, never pays gas — and still ends up with an independently
  * verifiable, public commitment to their document.
  *
- * State here is in memory. Anchoring is a durability mechanism, so a restart
- * before the next flush loses the pending queue, not the documents: the chunks
- * and manifests are already stored, and their receipts are already issued and
- * verifiable. Re-queue and anchor again. server/README.md says so plainly.
+ * State is durable (server/store.mjs). It has to be: a Merkle path depends on a
+ * document's index in its batch, so the ordered document list behind an
+ * anchored root is the only thing that can prove a document is in it. Held in
+ * memory, that list did not survive a restart, and a document anchored on a
+ * public chain became permanently unprovable while its receipt went on
+ * claiming otherwise.
+ *
+ * Proofs are derived on demand rather than stored, because a stored proof is a
+ * second copy of something the batch already determines, and two copies can
+ * disagree.
  */
 
 import {
   assertAnchorableDocument,
   buildBatch,
-  createBatchQueue,
-  proveInBatch,
+  proveWholeBatch,
 } from "../js/core/anchor.js";
+import { openStore } from "./store.mjs";
 import {
   generateSigningKey,
   importPrivateKey,
@@ -57,21 +63,60 @@ export async function createProofService(options = {}) {
 
   const kid = await keyId(publicKey);
 
-  const queue = createBatchQueue({
-    maxSize: options.batchMaxSize ?? 1000,
-    maxAgeMs: options.batchMaxAgeMs ?? 3600000,
-  });
+  const store = options.store || openStore({ path: options.dbPath || ":memory:" });
+  const batchMaxSize = options.batchMaxSize ?? 1000;
+  const batchMaxAgeMs = options.batchMaxAgeMs ?? 3600000;
+  const now = options.now || (() => Date.now());
 
-  // Batches that have been built and handed to the operator to anchor.
-  const batches = new Map(); // batchRoot -> batch
-  const proofsByDocument = new Map(); // fileHash -> inclusion proof
+  /**
+   * Built proofs, keyed by batch root. Derived state only — dropping this
+   * costs a tree rebuild, never a proof, which is the whole point of storing
+   * the document order instead of the paths.
+   */
+  const proofCache = new Map();
+  const PROOF_CACHE_BATCHES = options.proofCacheBatches ?? 8;
+
+  async function proofsForBatch(stored) {
+    const cached = proofCache.get(stored.root);
+    if (cached) return cached;
+
+    const documents = stored.documents.map((fileHash) => {
+      const document = store.findDocument(fileHash);
+      if (!document) {
+        throw new Error(`batch ${stored.root} names document ${fileHash}, which is not stored`);
+      }
+      return {
+        fileHash: document.fileHash,
+        merkleRoot: document.merkleRoot,
+        fileSize: document.fileSize,
+        manifestCID: document.manifestCID,
+      };
+    });
+
+    // Rebuilt from the stored order, so the root this produces must equal the
+    // one that was anchored. If it does not, the log disagrees with the chain
+    // and serving a proof from it would be worse than serving none.
+    const batch = await buildBatch(documents);
+    if (batch.root !== stored.root) {
+      throw new Error(
+        `rebuilt batch root ${batch.root} does not match the stored root ${stored.root}`
+      );
+    }
+
+    const proofs = await proveWholeBatch(batch);
+    proofCache.set(stored.root, proofs);
+    if (proofCache.size > PROOF_CACHE_BATCHES) {
+      proofCache.delete(proofCache.keys().next().value);
+    }
+    return proofs;
+  }
 
   return {
     kid,
     ephemeral,
     publicJwk: resolvedPublicJwk,
 
-    /** Issue a receipt and queue the document for the next anchor. */
+    /** Issue a receipt and record the document for the next anchor. */
     async record(document) {
       // Reject anything that cannot be anchored before it is receipted, rather
       // than when the batch is built. issueReceipt() only asks for three
@@ -80,53 +125,54 @@ export async function createProofService(options = {}) {
       // pending queue with it.
       const anchorable = normalizeDocument(document);
       const receipt = await issueReceipt(anchorable, privateKey, { issuer, kid });
-      const queued = queue.add({
-        fileHash: anchorable.fileHash,
-        merkleRoot: anchorable.merkleRoot,
-        fileSize: anchorable.fileSize,
-        manifestCID: anchorable.manifestCID,
-      });
-      return { receipt, queued: queued.queued, pending: queue.size() };
+
+      // Persist before returning: the receipt is a promise in writing, and one
+      // that outlives the process that made it only if the document does too.
+      const { stored } = store.recordDocument(anchorable, receipt);
+
+      return { receipt, queued: stored, pending: store.stats().pending };
     },
 
     status() {
+      const stats = store.stats();
+      const oldest = store.pendingDocuments(1)[0];
       return {
         kid,
         ephemeral,
-        pending: queue.size(),
-        shouldFlush: queue.shouldFlush(),
-        anchoredBatches: batches.size,
+        pending: stats.pending,
+        shouldFlush:
+          stats.pending > 0 &&
+          (stats.pending >= batchMaxSize || now() - oldest.recordedAt >= batchMaxAgeMs),
+        anchoredBatches: stats.batches,
+        documents: stats.documents,
       };
     },
 
     /**
      * Build a batch from everything pending.
      *
-     * Returns the root for the operator to submit on-chain, plus an inclusion
-     * proof for every document. The submission itself is deliberately not done
-     * here: it needs a funded key, and a signing key with spending power does
-     * not belong in the same process that accepts public uploads.
+     * Returns the root for the operator to submit on-chain. The submission
+     * itself is deliberately not done here: it needs a funded key, and a
+     * signing key with spending power does not belong in the same process that
+     * accepts public uploads.
      */
     async buildPendingBatch() {
-      if (queue.size() === 0) return null;
+      const pending = store.pendingDocuments(batchMaxSize);
+      if (pending.length === 0) return null;
 
-      // Build from a copy, and only drain once the batch and every proof
-      // exist. Draining as the argument to buildBatch() meant a rejection
-      // emptied the queue on its way out: every document in it lost its anchor
-      // having already been handed a receipt promising one.
-      const documents = queue.peek();
-      const batch = await buildBatch(documents);
-      const proofs = [];
-      for (const document of batch.documents) {
-        proofs.push([document.fileHash, await proveInBatch(batch, document.fileHash)]);
-      }
+      const batch = await buildBatch(
+        pending.map((document) => ({
+          fileHash: document.fileHash,
+          merkleRoot: document.merkleRoot,
+          fileSize: document.fileSize,
+          manifestCID: document.manifestCID,
+        }))
+      );
 
-      // Past this point nothing can throw, so the queue and the proof table
-      // move together. Documents recorded while the tree was being built are
-      // not in `documents` and stay queued for the next batch.
-      queue.drain(documents.length);
-      batches.set(batch.root, batch);
-      for (const [fileHash, proof] of proofs) proofsByDocument.set(fileHash, proof);
+      // One durable append records the batch and stamps its documents, so
+      // there is no window where a document is in a batch but not marked, or
+      // marked but not in one.
+      store.saveBatch(batch);
 
       return {
         root: batch.root,
@@ -135,13 +181,36 @@ export async function createProofService(options = {}) {
       };
     },
 
+    /** Note where a batch root landed on-chain, so verifiers can find it. */
+    recordAnchor(root, { txHash, block }) {
+      return store.anchorBatch(root, { txHash, block });
+    },
+
     /** The inclusion proof a user needs to verify their document on-chain. */
-    proofFor(fileHash) {
-      return proofsByDocument.get(fileHash.toLowerCase()) || null;
+    async proofFor(fileHash) {
+      const document = store.findDocument(String(fileHash).toLowerCase());
+      if (!document || document.batchRoot === null) return null;
+
+      const stored = store.findBatch(document.batchRoot);
+      if (!stored) return null;
+
+      const proof = (await proofsForBatch(stored)).get(document.fileHash);
+      if (!proof) return null;
+
+      // txHash and block are what lets a verifier find the transaction that
+      // carries this root. Without them they hold a proof and no way to check
+      // it against anything.
+      return stored.txHash
+        ? { ...proof, txHash: stored.txHash, block: stored.block }
+        : proof;
     },
 
     listBatches() {
-      return [...batches.values()].map((batch) => ({ root: batch.root, size: batch.size }));
+      return store.stats().batches;
+    },
+
+    close() {
+      store.close();
     },
   };
 }

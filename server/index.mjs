@@ -30,7 +30,7 @@ async function main() {
   const backend = createBackend(config);
 
   const signingKey = readSigningKey();
-  const proofs = await createProofService({ ...signingKey });
+  const proofs = await createProofService({ ...signingKey, dbPath: config.dbPath });
   if (proofs.ephemeral) {
     console.warn(
       "[oreochain] WARNING: no OREOCHAIN_RECEIPT_KEY set, so receipts are signed with a " +
@@ -54,7 +54,8 @@ async function main() {
   server.listen(config.port, config.host, () => {
     console.log(
       `[oreochain] gateway listening on http://${config.host}:${config.port} ` +
-        `(storage: ${backend.name}, auth: ${config.allowAnonymous ? "anonymous" : `${config.apiKeys.length} key(s)`}, receipts: ${proofs.kid})`
+        `(storage: ${backend.name}, auth: ${config.allowAnonymous ? "anonymous" : `${config.apiKeys.length} key(s)`}, ` +
+        `receipts: ${proofs.kid}, proofs: ${config.dbPath})`
     );
   });
 

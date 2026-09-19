@@ -29,3 +29,7 @@ Thumbs.db
 
 # Local configuration (contains endpoints and, in dev, tokens)
 js/config.js
+
+# Proof store: recorded documents and anchored batches.
+# Losing this leaves anchored documents unprovable, so back it up, don't commit it.
+oreochain-proofs.log
