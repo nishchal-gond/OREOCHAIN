@@ -68,6 +68,7 @@ intend.
 | `OREOCHAIN_SERVE_STATIC` | `false` | Also serve the frontend, so there is no CORS at all |
 | `OREOCHAIN_RECEIPT_KEY` | — | Receipt signing key pair. Generate with `node scripts/generate-receipt-key.mjs`. |
 | `OREOCHAIN_DB_PATH` | `./oreochain-proofs.log` | Recorded documents and anchored batches. `:memory:` for tests only. |
+| `OREOCHAIN_VERIFY_MANIFESTS` | `true` | Check a document against its manifest before signing a receipt for it |
 | `OREOCHAIN_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
 | `OREOCHAIN_SHUTDOWN_DELAY_MS` | `0` | Keep serving this long after SIGTERM, so a load balancer notices `/ready` first |
 
@@ -181,6 +182,40 @@ anchor. This is what lets a user register a document with no wallet and no gas.
 { "fileHash": "0x…", "merkleRoot": "0x…", "manifestCID": "bafy…",
   "fileSize": 4096, "totalChunks": 1, "encrypted": true, "suite": "aes-256-gcm" }
 ```
+
+Before signing, the gateway fetches `manifestCID` through its own storage
+backend and checks that the manifest's `fileHash`, `merkleRoot` and `fileSize`
+match what is being receipted. Without that, a receipt said "this service
+accepted this exact document" about three strings nobody had checked: a client
+could obtain a validly signed receipt — and then an on-chain anchor — for a
+document of its choosing, pointing at a manifest describing something else. The
+signature was never the part that was lying.
+
+Only the manifest *header* is read. `fileHash`, `merkleRoot`, `fileSize` and
+`totalChunks` are plaintext even for an encrypted file; the body holding the
+file name and chunk table stays sealed. No passphrase and no file key is
+involved, so this does not weaken the property that the gateway cannot read
+your documents.
+
+Two failures, deliberately distinguished:
+
+| Situation | Status | Meaning |
+|---|---|---|
+| Manifest disagrees with the document | `400` | Will never succeed; fix the request |
+| Manifest could not be read | `503` + `Retry-After` | A freshly pinned manifest may not have propagated; retry |
+
+The receipt records what was done, as `"verified": true` or `false` in the
+signed statement. The field is additive: receipts issued before it existed have
+no such key, so *absent* means "not asserted" rather than false, and every
+previously issued receipt still verifies. `OREOCHAIN_VERIFY_MANIFESTS=false`
+turns the check off and the process warns at startup; receipts then say
+`"verified": false`.
+
+**What this does not prove:** that the manifest's Merkle root is genuinely the
+root of the chunks it lists. That would mean fetching and hashing the whole
+file on every upload to re-derive what the client already computed. A client
+can still describe a file it invented — but it can no longer be handed a
+receipt for one document while pointing at a manifest for another.
 
 ### `POST /api/proofs/batch`
 
@@ -353,7 +388,12 @@ Honest list, so nobody assumes otherwise:
   development. Recorded documents and anchored batches *are* persisted — see
   `OREOCHAIN_DB_PATH` and the deployment note below.
 - **Anchor submission is manual.** The gateway builds the batch; something with
-  a funded key has to send the transaction.
+  a funded key has to send the transaction. Until that is automated, a
+  document is anchored only when someone remembers — which for a service is
+  the gap that matters most.
+- **A receipt proves the document matches its manifest, not that the manifest
+  is honest.** See `POST /api/proofs/record` above for exactly where that line
+  falls.
 - **No key rotation without a restart.** Keys are read once at startup, from
   the environment or from a `_FILE` mount. A rolling restart is graceful, so
   rotation costs a deploy rather than an outage.

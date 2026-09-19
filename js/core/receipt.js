@@ -105,6 +105,19 @@ export async function issueReceipt(document, privateKey, options = {}) {
     totalChunks: document.totalChunks,
     encrypted: Boolean(document.encrypted),
     suite: document.suite || null,
+
+    /*
+     * Whether the issuer checked this document against its manifest before
+     * signing, rather than signing the claim as given.
+     *
+     * Additive on purpose: the signature covers whatever the statement
+     * contains, so receipts issued before this field existed still verify, and
+     * absent reads as "not asserted" rather than false. Bumping
+     * RECEIPT_VERSION would instead invalidate every receipt already in a
+     * user's hands, which is a far worse trade for a field that is new
+     * information rather than a changed meaning.
+     */
+    verified: Boolean(document.verified),
   };
 
   const signature = await webcrypto().subtle.sign(
