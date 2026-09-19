@@ -241,8 +241,9 @@ directory the frontend needs, add it to `STATIC_DIRECTORIES` in
 3. **Bind to loopback** and let the proxy handle the internet.
 4. **One API key per client**, so a leaked key can be revoked without disrupting
    everyone. Revoking means removing it from `OREOCHAIN_API_KEYS` and restarting.
-5. **Ship the logs somewhere.** Each line is JSON with an event, a key digest
-   (never the key), byte counts and CIDs.
+5. **Ship the logs somewhere.** Each line is JSON with a time, a level, a
+   request id, a key digest (never the key), byte counts and CIDs. Scrape
+   `/metrics` too, and alert on `oreochain_documents_pending`.
 6. **Set `OREOCHAIN_RECEIPT_KEY` before going live.** Without it the gateway
    signs receipts with a throwaway key and warns at startup — every restart
    then invalidates every receipt previously issued, because nobody can verify
@@ -252,8 +253,11 @@ directory the frontend needs, add it to `STATIC_DIRECTORIES` in
    Authenticated callers are bucketed by key, anonymous ones by source address
    — which behind a reverse proxy is the proxy's address, so every anonymous
    caller shares one bucket unless the proxy enforces its own limits.
-8. `SIGTERM` drains in-flight requests before exiting, so a deploy does not
-   drop an upload mid-chunk.
+8. `SIGTERM` fails `/ready`, keeps serving for `OREOCHAIN_SHUTDOWN_DELAY_MS`,
+   then stops listening and drains in-flight requests, so a deploy does not
+   drop an upload mid-chunk. Give the orchestrator a termination grace period
+   longer than that delay plus your slowest upload, or it will `SIGKILL`
+   mid-drain and undo the point of it.
 9. **Put `OREOCHAIN_DB_PATH` on persistent storage and back it up.** It holds
    every recorded document and the ordered document list behind every anchored
    batch. That order is the only thing that can prove a document belongs to a
@@ -262,6 +266,57 @@ directory the frontend needs, add it to `STATIC_DIRECTORIES` in
    and flushed to disk before its receipt is returned, so a receipt always has
    a stored document behind it. The file is append-only JSON lines, so `wc -l`
    counts records and `tail` shows the most recent.
+
+## Running it in a container
+
+```bash
+cp .env.example .env            # fill in OREOCHAIN_API_KEYS
+mkdir -p secrets
+printf %s "$PINATA_JWT" > secrets/pinata_jwt
+node scripts/generate-receipt-key.mjs > secrets/receipt_key
+docker compose up --build
+```
+
+`docker-compose.yml` is the reference for how this service expects to be
+operated, not just a convenience: credentials as mounted files rather than
+environment values, the proof store on a named volume that outlives the
+container, a read-only root filesystem, and a grace period long enough for the
+shutdown window plus a drain. `secrets/` is gitignored.
+
+Two defaults change inside a container, and both are set in the image:
+
+- `HOST=0.0.0.0`. The default is loopback, which in a container's own network
+  namespace means nothing outside it can connect.
+- The entrypoint is `dumb-init`, so `SIGTERM` reaches the gateway. A process
+  running as PID 1 gets no default signal handling, and without this the
+  graceful shutdown never runs.
+
+CI builds the image, starts it, round-trips a chunk through it, stops it and
+checks it exited cleanly — so these stay true rather than rotting quietly.
+
+### Kubernetes
+
+The pieces that matter, given the above:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /health, port: 8787 }
+readinessProbe:
+  httpGet: { path: /ready, port: 8787 }
+  periodSeconds: 3
+env:
+  # Longer than the readiness period, so the probe observes the 503 before
+  # the listener closes.
+  - name: OREOCHAIN_SHUTDOWN_DELAY_MS
+    value: "5000"
+  - name: PINATA_JWT_FILE
+    value: /run/secrets/pinata_jwt
+# Longer than the delay plus the slowest upload you allow.
+terminationGracePeriodSeconds: 60
+```
+
+Liveness must stay on `/health`. Pointing it at `/ready` restarts the pod for
+draining, which is the thing it was asked to do.
 
 ## What is not here yet
 
@@ -276,6 +331,7 @@ Honest list, so nobody assumes otherwise:
 - **Anchor submission is manual.** The gateway builds the batch; something with
   a funded key has to send the transaction.
 - **No key rotation without a restart.** Keys are read once at startup, from
-  the environment or from a `_FILE` mount.
+  the environment or from a `_FILE` mount. A rolling restart is graceful, so
+  rotation costs a deploy rather than an outage.
 - **No upload deduplication.** The same chunk pinned twice is pinned twice.
   (A document recorded twice is now deduplicated; chunks are not.)

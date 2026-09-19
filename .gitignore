@@ -30,6 +30,11 @@ Thumbs.db
 # Local configuration (contains endpoints and, in dev, tokens)
 js/config.js
 
+# Secret material mounted into the container by docker-compose.yml.
+secrets/
+*.pem
+*.key
+
 # Proof store: recorded documents and anchored batches.
 # Losing this leaves anchored documents unprovable, so back it up, don't commit it.
 oreochain-proofs.log
