@@ -39,6 +39,30 @@ const PUBLIC_API = new Set(["/api/proofs/key"]);
 /** JSON bodies are metadata, not payloads, so they get a much tighter cap. */
 const MAX_JSON_BYTES = 64 * 1024;
 
+/**
+ * Directories the frontend is served from, relative to the static root.
+ *
+ * The root is the repository itself, so without an allowlist every file in it
+ * is a URL: `.git` (and through it the entire history), the server sources, and
+ * `js/config.js`, which holds deployment settings and, in direct mode, a
+ * pinning token. A denylist is the wrong shape here — it has to anticipate
+ * every future file, and the first one it misses is served.
+ *
+ * node_modules is on the list only for the bundles the pages genuinely load:
+ * web3 from a <script> tag on every page, and @noble's ES modules, which
+ * js/core/kdf.js and js/core/suites.js import by relative path so that no
+ * bundler is required.
+ */
+const STATIC_DIRECTORIES = [
+  "css/",
+  "js/",
+  "assets/",
+  "files/",
+  "node_modules/web3/dist/",
+  "node_modules/@noble/hashes/esm/",
+  "node_modules/@noble/ciphers/esm/",
+];
+
 const STATIC_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
@@ -198,6 +222,18 @@ function chunkName(req) {
   }
 }
 
+/**
+ * Is this path part of the frontend?
+ *
+ * @param {string} relative path from the static root, with "/" separators
+ */
+function isServablePath(relative) {
+  // The pages sit at the root, and only pages do: package.json, the lockfile
+  // and auto_update.txt are all root files that are nobody's business.
+  if (!relative.includes("/")) return relative.endsWith(".html");
+  return STATIC_DIRECTORIES.some((directory) => relative.startsWith(directory));
+}
+
 async function serveStatic(req, res, root) {
   const url = new URL(req.url, "http://localhost");
   const requested = url.pathname === "/" ? "/index.html" : url.pathname;
@@ -211,6 +247,13 @@ async function serveStatic(req, res, root) {
     return true;
   }
 
+  const relative = path.relative(root, resolved).split(path.sep).join("/");
+  // Not on the allowlist, or an extension the frontend never asks for (a .map,
+  // a .ts source, a stray .java): fall through to the same 404 a missing file
+  // gets, so this says nothing about what exists on disk.
+  const contentType = STATIC_TYPES.get(path.extname(resolved).toLowerCase());
+  if (!contentType || !isServablePath(relative)) return false;
+
   let info;
   try {
     info = await stat(resolved);
@@ -220,7 +263,7 @@ async function serveStatic(req, res, root) {
   if (!info.isFile()) return false;
 
   res.writeHead(200, {
-    "Content-Type": STATIC_TYPES.get(path.extname(resolved).toLowerCase()) || "application/octet-stream",
+    "Content-Type": contentType,
     "Content-Length": info.size,
     "Cache-Control": "no-cache",
   });
@@ -435,4 +478,11 @@ export function createHandler(config, backend, deps = {}) {
   };
 }
 
-export const _internals = { readBody, chunkName, serveStatic, CID_ROUTE };
+export const _internals = {
+  readBody,
+  chunkName,
+  serveStatic,
+  isServablePath,
+  STATIC_DIRECTORIES,
+  CID_ROUTE,
+};

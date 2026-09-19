@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { randomBytes, to0x } from "../js/core/bytes.js";
 import { sha256 } from "../js/core/chunker.js";
 import {
+  assertAnchorableDocument,
   buildBatch,
   createBatchQueue,
   documentLeaf,
@@ -169,6 +170,71 @@ test("the queue flushes on age, so a quiet period still anchors", () => {
 
   now = 60000;
   assert.equal(queue.shouldFlush(), true);
+});
+
+test("draining a count takes the oldest entries and leaves the rest", () => {
+  const queue = createBatchQueue({ maxSize: 10 });
+  for (let i = 1; i <= 5; i++) queue.add(doc(i));
+
+  // What a caller peeks is what a later drain(n) removes, so a batch can be
+  // built first and the queue trimmed only once it succeeded.
+  const peeked = queue.peek().slice(0, 3);
+  queue.add(doc(6)); // arrives mid-build
+  queue.drain(3);
+
+  assert.deepEqual(
+    queue.peek().map((entry) => entry.fileHash),
+    [doc(4), doc(5), doc(6)].map((entry) => entry.fileHash)
+  );
+  assert.deepEqual(
+    peeked.map((entry) => entry.fileHash),
+    [doc(1), doc(2), doc(3)].map((entry) => entry.fileHash)
+  );
+});
+
+test("a peek that is never drained leaves the queue untouched", () => {
+  const queue = createBatchQueue({ maxSize: 10 });
+  for (let i = 1; i <= 3; i++) queue.add(doc(i));
+
+  // The batch step reads through peek() precisely so a failure costs nothing.
+  // Draining first was how one unbatchable document took the whole queue out.
+  const documents = queue.peek();
+  documents[0] = doc(99); // a caller mutating its copy must not reach the queue
+
+  assert.equal(queue.size(), 3);
+  assert.equal(queue.peek()[0].fileHash, doc(1).fileHash);
+});
+
+test("a partially drained queue keeps asking to flush on age", () => {
+  let now = 0;
+  const queue = createBatchQueue({ maxSize: 1000, maxAgeMs: 60000, now: () => now });
+  queue.add(doc(1));
+  queue.add(doc(2));
+
+  now = 1000;
+  queue.drain(1);
+  assert.equal(queue.shouldFlush(), false, "the remainder should not flush immediately");
+
+  now = 61000;
+  assert.equal(queue.shouldFlush(), true, "the remainder should still age out");
+});
+
+test("a document that cannot be anchored is rejected before it is queued", () => {
+  assert.throws(() => assertAnchorableDocument({ ...doc(1), fileHash: "0xNOPE" }), /fileHash must be/);
+  assert.throws(() => assertAnchorableDocument({ ...doc(1), merkleRoot: "0x12" }), /merkleRoot must be/);
+  assert.throws(() => assertAnchorableDocument({ ...doc(1), fileSize: undefined }), /fileSize must be/);
+  assert.throws(() => assertAnchorableDocument({ ...doc(1), manifestCID: "" }), /manifestCID must be/);
+  assert.throws(() => assertAnchorableDocument(null), /must be an object/);
+
+  // Uppercase hex is a real submission shape and is not anchorable as-is —
+  // callers normalise before they get here.
+  assert.throws(
+    () => assertAnchorableDocument({ ...doc(1), fileHash: `0x${"AB".repeat(32)}` }),
+    /fileHash must be/
+  );
+
+  const valid = doc(1);
+  assert.equal(assertAnchorableDocument(valid), valid, "a valid document passes through");
 });
 
 test("the queue ignores duplicates and is empty-safe", () => {

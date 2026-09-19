@@ -7,9 +7,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { loadConfig, assertSafeConfig } from "../server/config.mjs";
-import { createHandler } from "../server/gateway.mjs";
+import { createHandler, _internals as gatewayInternals } from "../server/gateway.mjs";
 import { createMemoryBackend } from "../server/storage.mjs";
 import { authenticate, extractToken } from "../server/auth.mjs";
 import { createRateLimiter } from "../server/ratelimit.mjs";
@@ -424,6 +426,106 @@ test("anonymous callers are rate limited by source address, not as one pool", as
   }
 });
 
+// ---------------------------------------------------------- static frontend
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("serving the frontend does not serve the rest of the repository", async () => {
+  const gw = await startGateway({ OREOCHAIN_SERVE_STATIC: "true" }, { staticRoot: REPO_ROOT });
+  try {
+    // The static root is the repository, so everything below is a real file
+    // sitting next to the pages. Each one used to come back 200.
+    const secret = [
+      "/.git/config",
+      "/.git/HEAD",
+      "/server/config.mjs",
+      "/server/gateway.mjs",
+      "/package.json",
+      "/package-lock.json",
+      "/auto_update.txt",
+      "/test/gateway.test.js",
+      "/node_modules/.package-lock.json",
+      "/node_modules/web3/package.json",
+      "/js/kkk.java",
+    ];
+
+    for (const pathname of secret) {
+      const response = await fetch(`${gw.url}${pathname}`);
+      assert.equal(response.status, 404, `${pathname} is reachable`);
+    }
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("serving the frontend still serves the frontend", async () => {
+  const gw = await startGateway({ OREOCHAIN_SERVE_STATIC: "true" }, { staticRoot: REPO_ROOT });
+  try {
+    // Every page, plus one file from each allowlisted directory — including the
+    // two node_modules bundles the pages load directly, which is the reason the
+    // allowlist cannot simply exclude node_modules.
+    const expected = [
+      ["/", "text/html"],
+      ["/index.html", "text/html"],
+      ["/upload.html", "text/html"],
+      ["/verify.html", "text/html"],
+      ["/retrieve.html", "text/html"],
+      ["/admin.html", "text/html"],
+      ["/delete.html", "text/html"],
+      ["/css/main.css", "text/css"],
+      ["/js/chunked-app.js", "text/javascript"],
+      ["/js/core/kdf.js", "text/javascript"],
+      ["/js/storage/ipfs.js", "text/javascript"],
+      ["/files/loader.svg", "image/svg+xml"],
+      ["/assets/images/icon.png", "image/png"],
+      ["/node_modules/web3/dist/web3.min.js", "text/javascript"],
+      ["/node_modules/@noble/hashes/esm/argon2.js", "text/javascript"],
+      ["/node_modules/@noble/ciphers/esm/chacha.js", "text/javascript"],
+    ];
+
+    for (const [pathname, type] of expected) {
+      const response = await fetch(`${gw.url}${pathname}`);
+      assert.equal(response.status, 200, `${pathname} is not served`);
+      assert.ok(
+        response.headers.get("content-type").startsWith(type),
+        `${pathname} served as ${response.headers.get("content-type")}, expected ${type}`
+      );
+      await response.arrayBuffer();
+    }
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("traversal out of the static root is refused", async () => {
+  const gw = await startGateway({ OREOCHAIN_SERVE_STATIC: "true" }, { staticRoot: REPO_ROOT });
+  try {
+    for (const pathname of ["/../etc/passwd", "/js/../../etc/passwd", "/%2e%2e/etc/passwd"]) {
+      const response = await fetch(`${gw.url}${pathname}`);
+      assert.ok(response.status === 403 || response.status === 404, `${pathname} -> ${response.status}`);
+      assert.ok(!(await response.text()).includes("root:"));
+    }
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("the allowlist is a prefix match on directories, not a substring match", () => {
+  const { isServablePath } = gatewayInternals;
+
+  assert.equal(isServablePath("index.html"), true);
+  assert.equal(isServablePath("js/core/kdf.js"), true);
+  assert.equal(isServablePath("node_modules/@noble/hashes/esm/argon2.js"), true);
+
+  assert.equal(isServablePath("package.json"), false);
+  assert.equal(isServablePath(".git/config"), false);
+  assert.equal(isServablePath("server/config.mjs"), false);
+  assert.equal(isServablePath("node_modules/ws/index.js"), false);
+  // A sibling directory whose name merely starts with an allowed one.
+  assert.equal(isServablePath("js-private/secrets.js"), false);
+  assert.equal(isServablePath("cssx/leak.css"), false);
+});
+
 test("an unknown endpoint is a 404", async () => {
   const gw = await startGateway();
   try {
@@ -680,6 +782,81 @@ test("building a batch with nothing pending is not an error", async () => {
   } finally {
     await gw.stop();
   }
+});
+
+test("a document that cannot be anchored is refused, not receipted and queued", async () => {
+  const gw = await startGateway();
+  try {
+    // Every one of these passes issueReceipt's "three non-empty strings" check
+    // and fails the anchor's. They used to be signed, queued, and only rejected
+    // when the batch was built.
+    const good = {
+      fileHash: `0x${"11".repeat(32)}`,
+      merkleRoot: `0x${"22".repeat(32)}`,
+      manifestCID: "bafyGood",
+      fileSize: 10,
+    };
+    const unanchorable = [
+      { ...good, fileHash: "0xNOPE" },
+      { ...good, merkleRoot: "0x22" },
+      { ...good, fileSize: undefined },
+      { ...good, fileSize: -1 },
+    ];
+
+    for (const document of unanchorable) {
+      const response = await fetch(`${gw.url}/api/proofs/record`, {
+        method: "POST",
+        headers: authed({ "Content-Type": "application/json" }),
+        body: JSON.stringify(document),
+      });
+      assert.equal(response.status, 400, `accepted ${JSON.stringify(document)}`);
+    }
+
+    assert.equal(gw.proofs.status().pending, 0, "an unanchorable document was queued");
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("documents recorded while a batch is building stay queued for the next one", async () => {
+  const proofs = await createProofService();
+  const document = (i) => ({
+    fileHash: `0x${i.toString(16).padStart(64, "0")}`,
+    merkleRoot: `0x${"22".repeat(32)}`,
+    manifestCID: `bafy${i}`,
+    fileSize: 10,
+  });
+
+  for (let i = 0; i < 3; i++) await proofs.record(document(i));
+
+  // Start the build, then record a fourth before it settles.
+  const building = proofs.buildPendingBatch();
+  await proofs.record(document(3));
+  const batch = await building;
+
+  assert.equal(batch.size, 3, "the late document was swept into this batch");
+  assert.equal(proofs.status().pending, 1, "the late document was dropped");
+
+  const next = await proofs.buildPendingBatch();
+  assert.equal(next.size, 1);
+  assert.ok(proofs.proofFor(document(3).fileHash));
+});
+
+test("hex is normalised, so a document is receipted and anchored under one spelling", async () => {
+  const proofs = await createProofService();
+  const upper = {
+    fileHash: `0x${"AB".repeat(32)}`,
+    merkleRoot: `0x${"CD".repeat(32)}`,
+    manifestCID: "bafyUpper",
+    fileSize: 10,
+  };
+
+  const { receipt } = await proofs.record(upper);
+  assert.equal(receipt.statement.fileHash, upper.fileHash.toLowerCase());
+
+  await proofs.buildPendingBatch();
+  assert.ok(proofs.proofFor(upper.fileHash), "an uppercase hash could not be looked up");
+  assert.ok(proofs.proofFor(upper.fileHash.toLowerCase()));
 });
 
 test("an inclusion proof for an unknown document is a 404", async () => {

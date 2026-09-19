@@ -13,7 +13,12 @@
  * verifiable. Re-queue and anchor again. server/README.md says so plainly.
  */
 
-import { buildBatch, createBatchQueue, proveInBatch } from "../js/core/anchor.js";
+import {
+  assertAnchorableDocument,
+  buildBatch,
+  createBatchQueue,
+  proveInBatch,
+} from "../js/core/anchor.js";
 import {
   generateSigningKey,
   importPrivateKey,
@@ -68,12 +73,18 @@ export async function createProofService(options = {}) {
 
     /** Issue a receipt and queue the document for the next anchor. */
     async record(document) {
-      const receipt = await issueReceipt(document, privateKey, { issuer, kid });
+      // Reject anything that cannot be anchored before it is receipted, rather
+      // than when the batch is built. issueReceipt() only asks for three
+      // non-empty strings, so a document with a malformed fileHash used to be
+      // signed and queued, and only failed later — taking the rest of the
+      // pending queue with it.
+      const anchorable = normalizeDocument(document);
+      const receipt = await issueReceipt(anchorable, privateKey, { issuer, kid });
       const queued = queue.add({
-        fileHash: document.fileHash,
-        merkleRoot: document.merkleRoot,
-        fileSize: document.fileSize,
-        manifestCID: document.manifestCID,
+        fileHash: anchorable.fileHash,
+        merkleRoot: anchorable.merkleRoot,
+        fileSize: anchorable.fileSize,
+        manifestCID: anchorable.manifestCID,
       });
       return { receipt, queued: queued.queued, pending: queue.size() };
     },
@@ -99,12 +110,23 @@ export async function createProofService(options = {}) {
     async buildPendingBatch() {
       if (queue.size() === 0) return null;
 
-      const batch = await buildBatch(queue.drain());
-      batches.set(batch.root, batch);
-
+      // Build from a copy, and only drain once the batch and every proof
+      // exist. Draining as the argument to buildBatch() meant a rejection
+      // emptied the queue on its way out: every document in it lost its anchor
+      // having already been handed a receipt promising one.
+      const documents = queue.peek();
+      const batch = await buildBatch(documents);
+      const proofs = [];
       for (const document of batch.documents) {
-        proofsByDocument.set(document.fileHash, await proveInBatch(batch, document.fileHash));
+        proofs.push([document.fileHash, await proveInBatch(batch, document.fileHash)]);
       }
+
+      // Past this point nothing can throw, so the queue and the proof table
+      // move together. Documents recorded while the tree was being built are
+      // not in `documents` and stay queued for the next batch.
+      queue.drain(documents.length);
+      batches.set(batch.root, batch);
+      for (const [fileHash, proof] of proofs) proofsByDocument.set(fileHash, proof);
 
       return {
         root: batch.root,
@@ -122,6 +144,35 @@ export async function createProofService(options = {}) {
       return [...batches.values()].map((batch) => ({ root: batch.root, size: batch.size }));
     },
   };
+}
+
+/**
+ * Put a submitted document into the one shape the rest of the service assumes,
+ * or reject it as a client error.
+ *
+ * Hex is lowercased first because that is the only spelling the anchor accepts
+ * and the only one a receipt records — without this a caller writing `0xAB…`
+ * would be receipted under one spelling and anchored under another, and
+ * proofFor() would never find it again.
+ */
+function normalizeDocument(document) {
+  if (document === null || typeof document !== "object" || Array.isArray(document)) {
+    throw Object.assign(new Error("a document must be a JSON object"), { status: 400 });
+  }
+
+  const lower = (value) => (typeof value === "string" ? value.toLowerCase() : value);
+  const normalized = {
+    ...document,
+    fileHash: lower(document.fileHash),
+    merkleRoot: lower(document.merkleRoot),
+  };
+
+  try {
+    assertAnchorableDocument(normalized);
+  } catch (error) {
+    throw Object.assign(error, { status: 400 });
+  }
+  return normalized;
 }
 
 /** Parse a signing key pair from the environment, if one is configured. */
