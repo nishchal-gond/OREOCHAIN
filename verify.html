@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="./css/loader.css" />
     <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css"
+      href="./css/bootstrap.min.css"
       rel="stylesheet"
     />
     <link href="./css/aos.min.css" rel="stylesheet" />
@@ -81,14 +81,14 @@
           <div class="d-flex">
             <button
               id="loginButton"
-              onclick="connect()"
+              data-action="connect"
               class="btn main-button"
             >
               Login
             </button>
             <button
               id="logoutButton"
-              onclick="disconnect()"
+              data-action="disconnect"
               class="btn main-button"
             >
               Logout
@@ -107,7 +107,7 @@
           browser and only the hash is looked up.
         </p>
 
-        <input onchange="hashSelectedFile()" id="doc-file" type="file" />
+        <input data-action="hashSelectedFile" id="doc-file" type="file" />
 
         <label class="form-label mt-3" for="lookup-hash">
           …or paste a document hash
@@ -125,7 +125,7 @@
         <img id="loader" class="d-none" src="files/loader.svg" alt="loader" />
 
         <button
-          onclick="verifyRegistration()"
+          data-action="verifyRegistration"
           class="btn mt-4 upload-button d-block main-button"
           type="button"
           id="chunked-verify-button"
@@ -262,12 +262,9 @@
         <i class="mail-us fa-solid fa-headset"></i>
       </a>
     </div>
-    <i onclick="topFunction()" id="scroll-btn" class="fa-solid fa-angle-up"></i>
+    <i data-action="topFunction" id="scroll-btn" class="fa-solid fa-angle-up"></i>
     <script src="./js/script.js"></script>
-    <script
-      src="https://code.jquery.com/jquery-3.6.0.js"
-      crossorigin="anonymous"
-    ></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="./js/ui.js"></script>
+    <script src="./js/bootstrap.min.js"></script>
   </body>
 </html>
