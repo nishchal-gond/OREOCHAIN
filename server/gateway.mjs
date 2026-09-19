@@ -45,6 +45,13 @@ const PUBLIC_API = new Set(["/api/proofs/key"]);
 const MAX_JSON_BYTES = 64 * 1024;
 
 /**
+ * How many unanchored batches one listing returns. The worker anchors them
+ * oldest first and comes back, so a backlog drains over several ticks rather
+ * than in one unbounded response.
+ */
+const ANCHOR_PAGE = 100;
+
+/**
  * A client-supplied request id is echoed and logged, so it has to be inert:
  * bounded, and made only of characters that cannot break a header, forge a log
  * field or inject a newline into the JSON line it lands in.
@@ -629,8 +636,74 @@ export function createHandler(config, backend, deps = {}) {
           return;
         }
 
+        /*
+         * Anchoring is a privilege of its own, held by the worker's key and
+         * nothing else. Checked once here rather than at each of the three
+         * routes, so a fourth cannot be added without it.
+         */
+        const anchoring =
+          url.pathname === "/api/proofs/batch" ||
+          url.pathname === "/api/proofs/unanchored" ||
+          url.pathname === "/api/proofs/anchored";
+        if (proofs && anchoring && !auth.canAnchor) {
+          fail(403, {
+            error:
+              "this key may not drive anchoring — add it to OREOCHAIN_ANCHOR_API_KEYS if it " +
+              "belongs to the anchoring worker",
+          });
+          log.warn("anchoring refused", { keyId: auth.keyId, route });
+          metrics.increment("oreochain_auth_failures_total", { reason: "not an anchor key" });
+          return;
+        }
+
         if (proofs && url.pathname === "/api/proofs/status" && req.method === "GET") {
           sendJson(res, 200, proofs.status());
+          return;
+        }
+
+        /*
+         * What the anchoring worker reads on startup and on every tick. A
+         * batch listed here was built but never confirmed on-chain, which
+         * after a worker crash is the only record that it is owed a
+         * transaction.
+         */
+        if (proofs && url.pathname === "/api/proofs/unanchored" && req.method === "GET") {
+          sendJson(res, 200, { batches: proofs.unanchoredBatches(ANCHOR_PAGE) });
+          return;
+        }
+
+        /*
+         * Where the anchoring worker reports back what it submitted.
+         *
+         * The worker cannot write the proof store directly: it is a separate
+         * process, and the store takes a single-writer lock precisely to stop
+         * that. So the transaction it sent comes back over the API, which also
+         * keeps the funded key in a process that never accepts public uploads.
+         */
+        if (proofs && url.pathname === "/api/proofs/anchored" && req.method === "POST") {
+          const body = await readJson(req, { timeoutMs: config.readTimeoutMs });
+          let anchored;
+          try {
+            anchored = proofs.recordAnchor(body.root, {
+              txHash: body.txHash,
+              block: body.block,
+            });
+          } catch (error) {
+            throw Object.assign(error, { status: error.status || 400 });
+          }
+          sendJson(res, 200, {
+            root: anchored.root,
+            size: anchored.size,
+            txHash: anchored.txHash,
+            block: anchored.block,
+          });
+          log.info("batch anchored", {
+            keyId: auth.keyId,
+            root: anchored.root,
+            size: anchored.size,
+            txHash: anchored.txHash,
+            block: anchored.block,
+          });
           return;
         }
 

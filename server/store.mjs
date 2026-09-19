@@ -561,6 +561,25 @@ export function openStore({
     findDocument: (fileHash) => documents.get(String(fileHash).toLowerCase()) || null,
     findBatch: (root) => batches.get(root) || null,
 
+    /**
+     * Batches that were built but never anchored, oldest first.
+     *
+     * The anchoring worker is a separate process and can die between building
+     * a batch and submitting it. Without this, that batch would sit in the log
+     * for ever: its documents are already stamped, so they never come back as
+     * pending, and nothing else would ever look at it again. Insertion order
+     * is log order, so the oldest unanchored batch is the first one out.
+     */
+    unanchoredBatches(limit = Infinity) {
+      const out = [];
+      for (const batch of batches.values()) {
+        if (batch.txHash !== null) continue;
+        out.push(batch);
+        if (out.length >= limit) break;
+      }
+      return out;
+    },
+
     stats() {
       let pending = 0;
       for (const document of documents.values()) if (document.batchRoot === null) pending++;

@@ -29,10 +29,16 @@ export function extractToken(req) {
 }
 
 /**
- * @returns {{ok: true, keyId: string} | {ok: false, reason: string}}
+ * @returns {{ok: true, keyId: string, canAnchor: boolean} | {ok: false, reason: string}}
  */
 export function authenticate(req, config) {
-  if (config.allowAnonymous) return { ok: true, keyId: "anonymous" };
+  /*
+   * An anonymous gateway has no boundary to be inside of: anyone who can
+   * reach the port can already upload and record. Withholding the anchoring
+   * routes from it would only stop `npm run dev` working, while protecting
+   * nothing.
+   */
+  if (config.allowAnonymous) return { ok: true, keyId: "anonymous", canAnchor: true };
 
   const token = extractToken(req);
   if (!token) return { ok: false, reason: "missing bearer token" };
@@ -45,8 +51,27 @@ export function authenticate(req, config) {
   }
   if (!matched) return { ok: false, reason: "invalid api key" };
 
+  /*
+   * Anchoring is a separate privilege from uploading.
+   *
+   * A key that can record a document should not also be able to declare a
+   * batch anchored: the transaction hash it supplies is served to everyone
+   * who asks for a proof in that batch, and a well-formed fictitious one
+   * would send every verifier to a transaction that does not exist — and
+   * then make the real anchor a 409 conflict, so the batch could never be
+   * corrected. Only the worker's own key gets this.
+   */
+  let canAnchor = false;
+  for (const key of config.anchorApiKeys || []) {
+    if (constantTimeEquals(matched, key)) canAnchor = true;
+  }
+
   // Identify the key in logs and rate limits without ever writing it down.
-  return { ok: true, keyId: createHash("sha256").update(matched).digest("hex").slice(0, 12) };
+  return {
+    ok: true,
+    keyId: createHash("sha256").update(matched).digest("hex").slice(0, 12),
+    canAnchor,
+  };
 }
 
 export const _internals = { constantTimeEquals };

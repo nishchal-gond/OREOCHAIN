@@ -203,3 +203,33 @@ jobs:
           user=$(docker run --rm --entrypoint sh oreochain-gateway:ci -c 'id -un')
           test "$user" != "root" || { echo "::error::image runs as root"; exit 1; }
           echo "Runs as $user."
+
+      # The anchoring worker ships in the same image and is started with a
+      # different command. Two ways that breaks without anything else
+      # noticing: the file is not copied in, or web3 is pruned along with the
+      # dev dependencies. Both show up here.
+      - name: The anchoring worker is in the image and refuses to start blind
+        run: |
+          set +e
+          out=$(docker run --rm oreochain-gateway:ci node server/anchor-worker.mjs 2>&1)
+          code=$?
+          set -e
+          test "$code" = "1" || { echo "::error::expected exit 1, got $code"; echo "$out"; exit 1; }
+          echo "$out" | grep -q 'setting(s) are missing' \
+            || { echo "::error::no configuration error reported"; echo "$out"; exit 1; }
+
+          # With the settings present it gets as far as the chain, which means
+          # web3 loaded from the image rather than being pruned out of it.
+          set +e
+          out=$(docker run --rm \
+            -e OREOCHAIN_CHAIN_RPC=http://127.0.0.1:1 \
+            -e OREOCHAIN_CONTRACT_ADDRESS=0x0000000000000000000000000000000000000001 \
+            -e OREOCHAIN_ANCHOR_KEY=0x0000000000000000000000000000000000000000000000000000000000000001 \
+            -e OREOCHAIN_ANCHOR_API_KEY=ci-key-that-is-long-enough-to-be-accepted \
+            oreochain-gateway:ci node server/anchor-worker.mjs 2>&1)
+          code=$?
+          set -e
+          test "$code" = "1" || { echo "::error::expected exit 1, got $code"; echo "$out"; exit 1; }
+          echo "$out" | grep -q 'cannot anchor against this chain' \
+            || { echo "::error::preflight did not run"; echo "$out"; exit 1; }
+          echo "Worker starts, validates, and refuses cleanly."

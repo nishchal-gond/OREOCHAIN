@@ -69,11 +69,47 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # The anchoring worker. Commented out because it cannot start without a
+  # funded key and a deployed contract, and a compose file that fails on
+  # `up` for everyone without a chain is worse than one you have to opt into.
+  #
+  #   printf %s "$ANCHOR_KEY" > secrets/anchor_key
+  #   printf %s "$WORKER_API_KEY" > secrets/anchor_api_key
+  #
+  # anchor-worker:
+  #   build: .
+  #   restart: unless-stopped
+  #   command: ["node", "server/anchor-worker.mjs"]
+  #   depends_on:
+  #     gateway:
+  #       condition: service_healthy
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     OREOCHAIN_GATEWAY_URL: http://gateway:8787
+  #     OREOCHAIN_ANCHOR_KEY_FILE: /run/secrets/anchor_key
+  #     OREOCHAIN_ANCHOR_API_KEY_FILE: /run/secrets/anchor_api_key
+  #   secrets:
+  #     - anchor_key
+  #     - anchor_api_key
+  #   # No volume on purpose: everything it would remember it asks the
+  #   # contract for, so it restarts and redeploys freely.
+  #   read_only: true
+  #   tmpfs:
+  #     - /tmp
+  #   security_opt:
+  #     - no-new-privileges:true
+
 secrets:
   pinata_jwt:
     file: ./secrets/pinata_jwt
   receipt_key:
     file: ./secrets/receipt_key
+  # Uncommented alongside the anchor-worker service above.
+  # anchor_key:
+  #   file: ./secrets/anchor_key
+  # anchor_api_key:
+  #   file: ./secrets/anchor_api_key
 
 volumes:
   proofs:
