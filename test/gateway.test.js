@@ -681,6 +681,81 @@ test("building a batch with nothing pending is not an error", async () => {
   }
 });
 
+test("a document that cannot be anchored is refused, not receipted and queued", async () => {
+  const gw = await startGateway();
+  try {
+    // Every one of these passes issueReceipt's "three non-empty strings" check
+    // and fails the anchor's. They used to be signed, queued, and only rejected
+    // when the batch was built.
+    const good = {
+      fileHash: `0x${"11".repeat(32)}`,
+      merkleRoot: `0x${"22".repeat(32)}`,
+      manifestCID: "bafyGood",
+      fileSize: 10,
+    };
+    const unanchorable = [
+      { ...good, fileHash: "0xNOPE" },
+      { ...good, merkleRoot: "0x22" },
+      { ...good, fileSize: undefined },
+      { ...good, fileSize: -1 },
+    ];
+
+    for (const document of unanchorable) {
+      const response = await fetch(`${gw.url}/api/proofs/record`, {
+        method: "POST",
+        headers: authed({ "Content-Type": "application/json" }),
+        body: JSON.stringify(document),
+      });
+      assert.equal(response.status, 400, `accepted ${JSON.stringify(document)}`);
+    }
+
+    assert.equal(gw.proofs.status().pending, 0, "an unanchorable document was queued");
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("documents recorded while a batch is building stay queued for the next one", async () => {
+  const proofs = await createProofService();
+  const document = (i) => ({
+    fileHash: `0x${i.toString(16).padStart(64, "0")}`,
+    merkleRoot: `0x${"22".repeat(32)}`,
+    manifestCID: `bafy${i}`,
+    fileSize: 10,
+  });
+
+  for (let i = 0; i < 3; i++) await proofs.record(document(i));
+
+  // Start the build, then record a fourth before it settles.
+  const building = proofs.buildPendingBatch();
+  await proofs.record(document(3));
+  const batch = await building;
+
+  assert.equal(batch.size, 3, "the late document was swept into this batch");
+  assert.equal(proofs.status().pending, 1, "the late document was dropped");
+
+  const next = await proofs.buildPendingBatch();
+  assert.equal(next.size, 1);
+  assert.ok(proofs.proofFor(document(3).fileHash));
+});
+
+test("hex is normalised, so a document is receipted and anchored under one spelling", async () => {
+  const proofs = await createProofService();
+  const upper = {
+    fileHash: `0x${"AB".repeat(32)}`,
+    merkleRoot: `0x${"CD".repeat(32)}`,
+    manifestCID: "bafyUpper",
+    fileSize: 10,
+  };
+
+  const { receipt } = await proofs.record(upper);
+  assert.equal(receipt.statement.fileHash, upper.fileHash.toLowerCase());
+
+  await proofs.buildPendingBatch();
+  assert.ok(proofs.proofFor(upper.fileHash), "an uppercase hash could not be looked up");
+  assert.ok(proofs.proofFor(upper.fileHash.toLowerCase()));
+});
+
 test("an inclusion proof for an unknown document is a 404", async () => {
   const gw = await startGateway();
   try {

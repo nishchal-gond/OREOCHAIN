@@ -44,6 +44,38 @@ export const ANCHOR_VERSION = "oreochain-anchor-v1";
 /** Batches this large already amortise gas to near nothing; beyond it, proofs grow. */
 export const MAX_BATCH_SIZE = 65536;
 
+const HEX32 = /^0x[0-9a-f]{64}$/;
+
+/**
+ * Check that a document can be committed to, before anything depends on it.
+ *
+ * These rules used to live inside documentPreimage(), which meant they were
+ * enforced at the moment the batch was built — long after the document had been
+ * accepted, receipted and queued. A document that failed here then took every
+ * document queued alongside it down with it. Exported so a caller can apply the
+ * same rules at the door instead, where a rejection costs one request.
+ */
+export function assertAnchorableDocument(document) {
+  if (document === null || typeof document !== "object") {
+    throw new Error("a document must be an object");
+  }
+  const { fileHash, merkleRoot: root, fileSize, manifestCID } = document;
+
+  if (typeof fileHash !== "string" || !HEX32.test(fileHash)) {
+    throw new Error("fileHash must be 0x-prefixed 32-byte hex");
+  }
+  if (typeof root !== "string" || !HEX32.test(root)) {
+    throw new Error("merkleRoot must be 0x-prefixed 32-byte hex");
+  }
+  if (!Number.isInteger(fileSize) || fileSize < 0) {
+    throw new Error("fileSize must be a non-negative integer");
+  }
+  if (typeof manifestCID !== "string" || manifestCID.length === 0) {
+    throw new Error("manifestCID must be a non-empty string");
+  }
+  return document;
+}
+
 /**
  * Canonical bytes committing to one document.
  *
@@ -51,13 +83,9 @@ export const MAX_BATCH_SIZE = 65536;
  * preimage byte-for-byte. `fileSize` is a big-endian uint64, matching
  * abi.encodePacked, so the two implementations cannot drift.
  */
-export function documentPreimage({ fileHash, merkleRoot: root, fileSize, manifestCID }) {
-  if (!/^0x[0-9a-f]{64}$/.test(fileHash)) throw new Error("fileHash must be 0x-prefixed 32-byte hex");
-  if (!/^0x[0-9a-f]{64}$/.test(root)) throw new Error("merkleRoot must be 0x-prefixed 32-byte hex");
-  if (!Number.isInteger(fileSize) || fileSize < 0) throw new Error("fileSize must be a non-negative integer");
-  if (typeof manifestCID !== "string" || manifestCID.length === 0) {
-    throw new Error("manifestCID must be a non-empty string");
-  }
+export function documentPreimage(document) {
+  assertAnchorableDocument(document);
+  const { fileHash, merkleRoot: root, fileSize, manifestCID } = document;
 
   const size = new Uint8Array(8);
   new DataView(size.buffer).setBigUint64(0, BigInt(fileSize), false); // big-endian
@@ -181,11 +209,22 @@ export function createBatchQueue({ maxSize = 1000, maxAgeMs = 3600000, now = () 
       return pending.length >= maxSize || now() - oldest >= maxAgeMs;
     },
 
-    /** Take everything pending and reset. The caller anchors what it receives. */
-    drain() {
-      const taken = pending;
-      pending = [];
-      oldest = null;
+    /**
+     * Take pending documents and reset. The caller anchors what it receives.
+     *
+     * `count` takes only the oldest `count` entries, which is what lets a
+     * caller build a batch first and remove exactly those documents afterwards
+     * rather than emptying the queue before it knows the batch succeeded.
+     * Entries are only ever appended, so the first `count` are always the ones
+     * a preceding peek() returned.
+     */
+    drain(count = pending.length) {
+      const taken = pending.slice(0, count);
+      pending = pending.slice(count);
+      // Anything left was queued while the batch was being built, so its real
+      // age is at most one build. Restarting the clock is a few seconds of
+      // optimism, not a missed flush.
+      oldest = pending.length === 0 ? null : now();
       return taken;
     },
 
