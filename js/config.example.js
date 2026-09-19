@@ -54,25 +54,26 @@ window.OREOCHAIN_CONFIG = {
 
     // Passphrase key derivation.
     //
-    // This is the setting that actually protects a weak passphrase. The
-    // wrapped file key travels in the manifest, so an attacker who fetches one
-    // guesses offline at hardware speed — the cost of a single guess is the
-    // whole defence.
+    // This is the setting that actually protects a weak passphrase. The wrapped
+    // file key travels in the manifest, so an attacker who fetches one guesses
+    // offline at hardware speed — the cost of a single guess is the whole
+    // defence. Argon2id is memory-hard: every guess must allocate and traverse
+    // the profile's full memory cost, which is what a GPU or ASIC cannot cheaply
+    // multiply.
     //
-    // Argon2id is memory-hard: every guess must allocate and traverse this
-    // much memory, which is what a GPU or ASIC cannot cheaply multiply.
-    // 65536 KiB / 2 passes costs roughly 2.2s and is about 2.8x as expensive
-    // to attack as a 46 MiB single-pass profile. It is affordable only because
-    // derivation runs in a worker and no longer freezes the page. Raise it
-    // further on a server, where nobody is watching a spinner.
+    // The name alone means "use the profile this version of OREOCHAIN ships",
+    // which is defined once in js/core/kdf.js as ARGON2ID_DEFAULTS and written
+    // up in docs/SEALING.md §3. Deliberately no numbers here: spelling them out
+    // pins them, so a copy of this file made today would keep today's profile
+    // after an upgrade raised it, silently and with nothing to notice.
     //
-    // "pbkdf2-sha256" is still readable so files sealed before this change
-    // still open, but it is memory-cheap and should not be chosen for new files.
-    kdf: {
-      name: "argon2id",
-      memoryKiB: 65536,
-      iterations: 2,
-      parallelism: 1,
-    },
+    // To override deliberately — a server, where nobody is watching a spinner,
+    // can afford much more memory — give the parameters you want and they win:
+    //
+    //     kdf: { name: "argon2id", memoryKiB: 262144, iterations: 3, parallelism: 1 }
+    //
+    // "pbkdf2-sha256" is still readable so files sealed before Argon2id still
+    // open, but it is memory-cheap and should not be chosen for new files.
+    kdf: "argon2id",
   },
 };

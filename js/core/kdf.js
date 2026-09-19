@@ -39,25 +39,72 @@ export const DEFAULT_KDF = KDF_ARGON2ID;
 const KEY_BYTES = 32;
 
 /**
- * m=64 MiB, t=2, p=1 — comfortably above OWASP's recommended profiles.
+ * THE SHIPPED ARGON2ID PROFILE — THE ONLY PLACE THESE NUMBERS ARE WRITTEN.
+ *
+ * Every other mention of them in this repository is derived from here: the
+ * example config points at this file instead of restating the numbers, the
+ * settings tables and prose in docs/SECURITY.md, docs/SEALING.md and Readme.md
+ * are written from here by scripts/sync-kdf-docs.mjs, test/docs-kdf.test.js
+ * fails while any of that prose disagrees with these values, and
+ * test/kdf.test.js ratchets them against a floor instead of restating them.
+ * Change the profile here, run `npm run kdf-docs`, and the repository agrees
+ * with itself again.
  *
  * Memory is the parameter that hurts a parallel attacker most, so it gets the
  * larger share of the budget, but passes are not free to an attacker either:
- * cost scales roughly with memory x passes, making this about 2.8 times as
- * expensive to attack as the 46 MiB single-pass profile it replaces.
+ * cost scales roughly with memory x passes. Deliberately no figure appears in
+ * this comment; the numbers are directly below, and a comment restating them is
+ * how the last six copies started.
  *
- * It costs roughly 2.2s in pure JavaScript on a desktop. That is affordable
- * only because derivation runs in a worker (js/core/kdf-worker.js) and no
- * longer freezes the page — on the main thread this would have been an
- * unusable amount of jank, which is exactly why the worker came first.
- *
- * A server, where nobody is watching a spinner, can raise it further.
+ * The cost is affordable only because derivation runs in a worker
+ * (js/core/kdf-worker.js) and no longer freezes the page — on the main thread
+ * this would have been an unusable amount of jank, which is exactly why the
+ * worker came first. A server, where nobody is watching a spinner, can raise it
+ * further.
  */
 export const ARGON2ID_DEFAULTS = Object.freeze({
   memoryKiB: 65536,
   iterations: 2,
   parallelism: 1,
 });
+
+/**
+ * Claims about the profile above, rather than the profile itself, kept out of
+ * ARGON2ID_DEFAULTS because that object is a parameter set handed to Argon2 and
+ * compared against manifests. These are the two things the documentation says
+ * that cannot be read off the parameters, so they live here for the same reason
+ * the parameters do.
+ */
+export const ARGON2ID_PROFILE = Object.freeze({
+  /**
+   * Measured, not computed: one derivation in pure JavaScript on a desktop,
+   * with no worker. A phone is slower, sometimes several times slower. Re-time
+   * it when the parameters change — `npm run kdf-docs` cannot.
+   */
+  estimatedSeconds: 2.2,
+
+  /**
+   * The first Argon2id profile OREOCHAIN shipped (PR #5), kept as the cost floor
+   * the defaults must never fall back below. Raising the defaults is always
+   * welcome and needs no edit here; dropping under this line weakens a file's
+   * only defence against an offline guess, and test/kdf.test.js fails rather
+   * than let that pass for a typo.
+   *
+   * It is also the profile test/kdf.test.js seals a file under to prove older
+   * files still open, so it stays a real historical profile and not a round
+   * number.
+   */
+  costFloor: Object.freeze({ memoryKiB: 47104, iterations: 1, parallelism: 1 }),
+});
+
+/**
+ * What an attacker's budget actually buys against a profile: memory x passes.
+ * Halving either number halves this, which is why it is the quantity the tests
+ * and the documentation compare rather than memory alone.
+ */
+export function argon2idCost(spec = ARGON2ID_DEFAULTS) {
+  return spec.memoryKiB * spec.iterations;
+}
 
 /** OWASP's floor for PBKDF2-HMAC-SHA256. Legacy files only. */
 export const PBKDF2_DEFAULTS = Object.freeze({ iterations: 600000 });
@@ -84,7 +131,7 @@ export function kdfSpec(input = DEFAULT_KDF) {
   if (typeof input === "number" || typeof input === "boolean" || input === null) {
     throw new Error(
       `kdf must be a name or a parameter object, received ${typeof input} — ` +
-        'e.g. "argon2id" or { name: "argon2id", memoryKiB: 65536 }'
+        `e.g. "argon2id" or { name: "argon2id", memoryKiB: ${ARGON2ID_DEFAULTS.memoryKiB} }`
     );
   }
   const raw = typeof input === "string" ? { name: input } : { ...input };

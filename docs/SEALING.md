@@ -85,6 +85,14 @@ Split into a public header and an encrypted body (`js/core/manifest.js`):
 `js/core/kdf.js`. New files use Argon2id; PBKDF2-SHA256 is readable but never
 written.
 
+The two tables in this section are generated from `ARGON2ID_DEFAULTS` and
+`ARGON2ID_PROFILE` in `js/core/kdf.js` and `MANIFEST_LIMITS` in
+`js/core/limits.js`. Change the profile there and run `npm run kdf-docs`; editing
+a number here instead is reverted by the next run, and `npm test` fails while the
+two disagree. Section 4 below is the exception: it is hand-written history, and
+its numbers stay as they are however the defaults move afterwards.
+
+<!-- kdf:settings -->
 | Setting | Value |
 |---|---|
 | Default KDF | `argon2id` (`DEFAULT_KDF`) |
@@ -95,6 +103,7 @@ written.
 | KDF salt | 16 random bytes, unique per file |
 | Cost to derive | ~2.2s in pure JavaScript on a desktop, longer on a phone |
 | Legacy PBKDF2 | 600,000 iterations, SHA-256 — read-only |
+<!-- /kdf:settings -->
 
 Argon2id rather than Argon2i or Argon2d: the hybrid RFC 9106 recommends by
 default. The implementation is checked against the RFC 9106 §5.3 known-answer
@@ -115,6 +124,7 @@ Parameters travel with the file, so whoever serves a manifest picks them. Both
 directions are bounded in `js/core/limits.js` and enforced by
 `validateKdfParameters`:
 
+<!-- kdf:bounds -->
 | Bound | Value | Stops |
 |---|---|---|
 | Min Argon2 memory | 19,456 KiB | A manifest setting memory to 8 KiB, making cracking as cheap as before Argon2id, with the file still opening normally |
@@ -122,6 +132,7 @@ directions are bounded in `js/core/limits.js` and enforced by
 | Argon2 passes | 1–16 | |
 | Argon2 parallelism | 1–16 | |
 | PBKDF2 iterations | 600,000–50,000,000 | A legacy manifest claiming fewer than the OWASP floor |
+<!-- /kdf:bounds -->
 
 `assertArgon2Shape` additionally requires `memoryKiB >= 8 * parallelism`, which
 Argon2 needs per lane, turning a cryptic failure inside the hash into a clear
@@ -166,11 +177,15 @@ Three things keep already-sealed files opening:
    `pbkdf2-hmac-sha256` — and maps them onto one internal name. It is never
    chosen for new files.
 3. **There is a test that proves it.** `test/kdf.test.js` round-trips a file
-   sealed under the real previous profile (46 MiB, one pass), not a cheap
-   stand-in, and asserts that profile differs from the current default so the
-   test cannot pass vacuously. The defaults are also pinned by assertion,
-   including a floor on `memory × passes`, because a one-character edit to
-   either number is invisible in review and would halve the cost of an attack.
+   sealed under <!-- kdf:oldest -->the real first profile OREOCHAIN shipped (46 MiB, one pass)<!-- /kdf:oldest -->,
+   not a cheap stand-in, and asserts that profile differs from the current
+   default so the test cannot pass vacuously. It takes that profile from
+   `ARGON2ID_PROFILE.costFloor`, which is also the floor the defaults are
+   ratcheted against: the oldest profile still in the wild and the weakest one
+   still acceptable are the same fact. The assertion is on `memory × passes`
+   rather than on the current numbers, so raising the defaults needs no edit to
+   the test, while a one-character edit that halves either number — invisible in
+   review — fails it.
 
 This matters more than a usual compatibility guarantee: if a KDF change
 stranded a stored file, the file would be destroyed outright. There is no path

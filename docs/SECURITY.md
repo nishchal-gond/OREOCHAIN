@@ -36,7 +36,7 @@ So OREOCHAIN uses standard primitives, from the platform's own implementation:
 |---|---|
 | Chunk encryption | AES-256-GCM, XChaCha20-Poly1305, or both |
 | Key derivation | HKDF-SHA256 |
-| Passphrase stretching | Argon2id (64 MiB, 2 passes) — PBKDF2-SHA256 read-only for legacy files |
+| Passphrase stretching | <!-- kdf:primitive -->Argon2id (64 MiB, 2 passes)<!-- /kdf:primitive --> — PBKDF2-SHA256 read-only for legacy files |
 | Content hashing | SHA-256 |
 | Integrity commitment | Merkle tree, domain-separated |
 
@@ -168,6 +168,7 @@ recommends by default: Argon2d's data-dependent addressing resists time-memory
 trade-offs but leaks through cache side channels, Argon2i is the reverse, and
 Argon2id takes one pass of each.
 
+<!-- kdf:profile -->
 The shipped profile is m=65536 KiB, t=2, p=1, comfortably above OWASP's
 recommended settings and roughly 2.8 times as expensive to attack as the
 46 MiB single-pass profile it replaced. It costs about 2.2s, which is
@@ -176,6 +177,7 @@ affordable only because it runs in a dedicated worker
 responsive and the cost is no longer paid in visible jank — which is what makes
 raising these parameters practical. A server can afford more memory and should
 use it.
+<!-- /kdf:profile -->
 
 Where no worker exists, or where the worker script fails to load, derivation
 falls back to the calling thread: slower and visibly so, but still correct. A
@@ -202,11 +204,13 @@ without the key.
 The passphrase never encrypts data. It derives a key-encryption key that wraps a
 random per-file key:
 
+<!-- kdf:envelope -->
 ```
 fileKey        = 32 random bytes
 KEK            = Argon2id(passphrase, kdfSalt, m=65536KiB, t=2, p=1)
 wrappedFileKey = AES-256-GCM(KEK, fileKey)
 ```
+<!-- /kdf:envelope -->
 
 Changing a passphrase rewraps ~60 bytes instead of re-encrypting the archive.
 Two uploads of the same document produce completely different ciphertext (fresh
@@ -259,7 +263,7 @@ The interesting attacks there never reach the crypto at all:
 |---|---|---|
 | `totalChunks: 4e9` | restore loop hangs | bounded chunk count |
 | `fileSize: 1e15` | allocation kills the process | bounded size, consistency check |
-| `kdf.memoryKiB: 8` | passphrase cracking becomes cheap again | floor of 19,456 KiB enforced |
+| `kdf.memoryKiB: 8` | passphrase cracking becomes cheap again | <!-- kdf:table-floor -->floor of 19,456 KiB enforced<!-- /kdf:table-floor --> |
 | `kdf.memoryKiB: 8GiB` | opening a file becomes a denial of service | ceiling enforced |
 | `kdf.iterations: 1e12` | client hangs in PBKDF2 | ceiling enforced |
 | `__proto__` key | prototype pollution | rejected outright, not sanitised |
@@ -325,7 +329,7 @@ an audit.
   cost per guess by orders of magnitude; it does not make `password1` safe. The
   wrapped key is public, so a short passphrase remains the most likely way an
   attacker gets in.
-- **Key derivation takes about two seconds**, and longer on a low-end phone.
+- **Key derivation takes about <!-- kdf:wait -->2.2 seconds<!-- /kdf:wait -->**, and longer on a low-end phone.
   The worker keeps the page responsive, but the user is still waiting. That
   wait is the price of the attacker's cost; it cannot be reduced without
   reducing theirs.
@@ -364,7 +368,7 @@ an audit.
    treated as public forever — rotate it, don't just delete it.
 2. **Keep `js/config.js` out of version control.** It is gitignored. Only
    `js/config.example.js` is committed.
-3. **Do not lower the Argon2id memory below 19,456 KiB.** It is the OWASP floor
+3. **Do not lower <!-- kdf:floor -->the Argon2id memory below 19,456 KiB<!-- /kdf:floor -->.** It is the OWASP floor
    and the main thing standing between a weak passphrase and an offline
    attacker. Raise it server-side, where a slower derivation costs nobody a
    frozen tab.

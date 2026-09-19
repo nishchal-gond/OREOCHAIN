@@ -14,6 +14,8 @@ import { argon2id } from "../node_modules/@noble/hashes/esm/argon2.js";
 import { equalBytes, randomBytes, toHex, utf8 } from "../js/core/bytes.js";
 import {
   ARGON2ID_DEFAULTS,
+  ARGON2ID_PROFILE,
+  argon2idCost,
   DEFAULT_KDF,
   deriveKeyEncryptionKey,
   describeKdf,
@@ -61,34 +63,58 @@ test("Argon2id is the default for new files", () => {
   assert.equal(kdfSpec().name, KDF_ARGON2ID);
 });
 
-test("the shipped Argon2id parameters clear the OWASP floor with room to spare", () => {
-  // m >= 19456 KiB with t >= 1, p = 1 is OWASP's minimum recommended profile.
+test("the shipped Argon2id parameters clear the OWASP floor", () => {
+  /*
+   * MANIFEST_LIMITS.minArgon2MemoryKiB is OWASP's minimum recommended memory,
+   * and it is asserted against rather than restated, so this test cannot
+   * disagree with the bound the reader of a manifest actually enforces.
+   */
   assert.ok(
-    ARGON2ID_DEFAULTS.memoryKiB >= 19456,
-    `expected >= 19456 KiB, got ${ARGON2ID_DEFAULTS.memoryKiB}`
+    ARGON2ID_DEFAULTS.memoryKiB >= MANIFEST_LIMITS.minArgon2MemoryKiB,
+    `expected >= ${MANIFEST_LIMITS.minArgon2MemoryKiB} KiB, got ${ARGON2ID_DEFAULTS.memoryKiB}`
   );
-  assert.ok(ARGON2ID_DEFAULTS.iterations >= 1);
-  assert.ok(ARGON2ID_DEFAULTS.parallelism >= 1);
-  assert.ok(ARGON2ID_DEFAULTS.memoryKiB >= MANIFEST_LIMITS.minArgon2MemoryKiB);
+  assert.ok(ARGON2ID_DEFAULTS.iterations >= MANIFEST_LIMITS.minArgon2Iterations);
+  assert.ok(ARGON2ID_DEFAULTS.parallelism >= MANIFEST_LIMITS.minArgon2Parallelism);
+});
 
-  // Attacker cost scales roughly with memory x passes. Pin the intended
-  // profile so a future edit cannot quietly weaken it: a one-character change
-  // to either number is invisible in review and halves the cost of an attack.
-  assert.equal(ARGON2ID_DEFAULTS.memoryKiB, 65536);
-  assert.equal(ARGON2ID_DEFAULTS.iterations, 2);
+test("the defaults can be raised but never weakened below the shipped floor", () => {
+  /*
+   * A ratchet, not a copy of the current profile. Attacker cost scales roughly
+   * with memory x passes, so the product is what gets the floor: a one-character
+   * typo that halves either number is invisible in review and has to fail here.
+   *
+   * Deliberately no copy of the shipped memory or pass count in this file.
+   * Restating the profile in the tests is part of what made raising it in PR #7
+   * a twelve-file change, and an assertion that has to be edited to let a
+   * stronger profile through is an assertion that gets edited without being
+   * thought about.
+   */
+  const shipped = argon2idCost(ARGON2ID_DEFAULTS);
+  const floor = argon2idCost(ARGON2ID_PROFILE.costFloor);
+
   assert.ok(
-    ARGON2ID_DEFAULTS.memoryKiB * ARGON2ID_DEFAULTS.iterations >= 47104,
-    "the default must never cost an attacker less than the profile it replaced"
+    shipped >= floor,
+    `the defaults cost an attacker ${shipped} KiB-passes, below the floor of ${floor}`
   );
+
+  // And the floor is a real profile rather than a round number, so that the
+  // compatibility test below can seal a file with it.
+  assert.ok(ARGON2ID_PROFILE.costFloor.memoryKiB >= 8 * ARGON2ID_PROFILE.costFloor.parallelism);
+  assert.ok(ARGON2ID_PROFILE.estimatedSeconds > 0);
 });
 
 test("the legacy PBKDF2 floor is still the OWASP recommendation", () => {
-  assert.ok(PBKDF2_DEFAULTS.iterations >= 600000);
+  // Compared against the bound a legacy manifest is held to rather than against
+  // a copy of it. The default may sit above that bound; it may never sit below.
+  assert.ok(
+    PBKDF2_DEFAULTS.iterations >= MANIFEST_LIMITS.minIterations,
+    `expected >= ${MANIFEST_LIMITS.minIterations}, got ${PBKDF2_DEFAULTS.iterations}`
+  );
 });
 
 test("partial parameter sets are filled in from the defaults", () => {
-  const spec = kdfSpec({ name: "argon2id", memoryKiB: 65536 });
-  assert.equal(spec.memoryKiB, 65536);
+  const spec = kdfSpec({ name: "argon2id", memoryKiB: MANIFEST_LIMITS.minArgon2MemoryKiB });
+  assert.equal(spec.memoryKiB, MANIFEST_LIMITS.minArgon2MemoryKiB);
   assert.equal(spec.iterations, ARGON2ID_DEFAULTS.iterations);
   assert.equal(spec.parallelism, ARGON2ID_DEFAULTS.parallelism);
 });
@@ -113,10 +139,17 @@ test("a bare number is rejected rather than silently meaning defaults", () => {
 });
 
 test("describeKdf states the parameters a user is relying on", () => {
-  assert.match(describeKdf("argon2id"), /Argon2id \(65536 KiB, 2 passes, p=1\)/);
+  const { memoryKiB, iterations, parallelism } = ARGON2ID_DEFAULTS;
+  assert.equal(
+    describeKdf("argon2id"),
+    `Argon2id (${memoryKiB} KiB, ${iterations} passes, p=${parallelism})`
+  );
   assert.match(describeKdf({ name: "argon2id", iterations: 3 }), /3 passes/);
   assert.match(describeKdf({ name: "argon2id", iterations: 1 }), /1 pass,/);
-  assert.match(describeKdf({ name: "pbkdf2-sha256" }), /PBKDF2-SHA256 \(600000/);
+  assert.equal(
+    describeKdf({ name: "pbkdf2-sha256" }),
+    `PBKDF2-SHA256 (${PBKDF2_DEFAULTS.iterations} iterations)`
+  );
 });
 
 // ---------------------------------------------------------------- derivation
@@ -347,17 +380,19 @@ test("a file sealed under the previous default profile still opens", async () =>
    * must not strand anything already stored. If it did, those files would be
    * destroyed outright — there is no path to the plaintext without the key.
    *
-   * This uses the real profile that shipped before the raise (46 MiB, one
-   * pass), not a cheap stand-in, because the point is that genuine older
-   * files open.
+   * ARGON2ID_PROFILE.costFloor is the real profile that shipped first, not a
+   * cheap stand-in, because the point is that genuine older files open. It is
+   * also the floor the test above ratchets against, which is why it lives in
+   * kdf.js: the oldest profile still in the wild and the weakest one still
+   * acceptable are the same fact.
    */
-  const previousDefault = { name: "argon2id", memoryKiB: 47104, iterations: 1, parallelism: 1 };
+  const previousDefault = { name: "argon2id", ...ARGON2ID_PROFILE.costFloor };
 
   const { manifest, restored, data } = await roundTrip(previousDefault);
 
   assert.ok(equalBytes(restored.bytes, data));
-  assert.equal(manifest.kdf.memoryKiB, 47104);
-  assert.equal(manifest.kdf.iterations, 1);
+  assert.equal(manifest.kdf.memoryKiB, ARGON2ID_PROFILE.costFloor.memoryKiB);
+  assert.equal(manifest.kdf.iterations, ARGON2ID_PROFILE.costFloor.iterations);
 
   // And the current default really is different, so this is a real regression
   // guard rather than a test that would pass either way.
