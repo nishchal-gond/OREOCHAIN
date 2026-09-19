@@ -219,13 +219,72 @@ receipt for one document while pointing at a manifest for another.
 
 ### `POST /api/proofs/batch`
 
-Builds a batch from everything pending and returns the Merkle root for the
-operator to anchor on-chain, plus the list of documents it covers.
+Builds a batch from everything pending and returns the Merkle root to anchor
+on-chain, plus the list of documents it covers.
 
 Submission is deliberately **not** done here: it needs a funded key, and a key
 with spending power does not belong in the same process that accepts public
-uploads. Take the root and submit it with `anchorBatch(root, size, uri)` from
-wherever you keep that key.
+uploads. The anchoring worker calls this and sends the transaction — see
+[The anchoring worker](#the-anchoring-worker). Calling it by hand still works
+if you would rather submit anchors yourself.
+
+### `GET /api/proofs/unanchored`
+
+Batches that were built but never confirmed on-chain, oldest first, at most
+100 at a time. Needs an anchoring key — see below.
+
+This is how the worker recovers. It owns the funded key and the chain
+connection but not the store, so after a crash between building a batch and
+submitting it, the gateway is the only thing that knows the batch exists —
+its documents are already stamped, so they never come back as pending.
+
+### `POST /api/proofs/anchored`
+
+```json
+{ "root": "0x…", "txHash": "0x…", "block": 21000000 }
+```
+
+Records where a batch root landed, so inclusion proofs can carry the
+transaction a verifier checks them against.
+
+Validated rather than trusted, because this is the one place a client's claim
+ends up inside something the gateway serves to everyone:
+
+| Situation | Status |
+|---|---|
+| Malformed root, txHash or block | `400` |
+| No such batch | `404` |
+| Already anchored in a *different* transaction | `409` |
+| Already anchored in the *same* transaction | `200` |
+
+The last two matter together: a worker that crashed after sending and before
+recording will report again on restart, and that has to be accepted or the
+batch deadlocks. Two different transactions for one root means something
+upstream is wrong, and overwriting would hide it while breaking proofs already
+served.
+
+### Anchoring is a separate privilege
+
+`OREOCHAIN_ANCHOR_API_KEYS` names the subset of `OREOCHAIN_API_KEYS` allowed to
+call `/api/proofs/batch`, `/api/proofs/unanchored` and `/api/proofs/anchored`.
+Every other key gets a `403`, however valid it is for uploading.
+
+The reason is `/api/proofs/anchored`. The transaction hash it records is served
+to everyone who asks for a proof in that batch, so a client that could post a
+well-formed fictitious one would send every verifier to a transaction that does
+not exist — and the real anchor would then be rejected as a conflict, leaving
+the batch permanently misreported. Uploading and anchoring are different jobs;
+they get different keys.
+
+It fails closed. With `OREOCHAIN_ANCHOR_API_KEYS` unset nothing may anchor, and
+the gateway warns at startup that batches will be built and never anchored. An
+entry that is not also in `OREOCHAIN_API_KEYS` is refused at startup, since
+that key could never authenticate in the first place.
+
+`OREOCHAIN_ALLOW_ANONYMOUS=true` grants it to everyone, because an anonymous
+gateway has no boundary to be inside of — anyone who can reach the port can
+already upload and record. That is for local development, not for a
+deployment.
 
 ### `GET /api/proofs/key` — public
 
@@ -264,6 +323,102 @@ file must also have an extension the frontend actually uses, so source maps and
 `.ts` sources stay unreachable. Anything else is a 404. **If you add a
 directory the frontend needs, add it to `STATIC_DIRECTORIES` in
 `server/gateway.mjs`.**
+
+## The anchoring worker
+
+The gateway builds batches. Something has to put their roots on-chain, and
+until now that was a person with a wallet. `server/anchor-worker.mjs` is that
+something.
+
+```bash
+OREOCHAIN_CHAIN_RPC=https://rpc.example \
+OREOCHAIN_CONTRACT_ADDRESS=0x… \
+OREOCHAIN_ANCHOR_KEY_FILE=/run/secrets/anchor_key \
+OREOCHAIN_ANCHOR_API_KEY_FILE=/run/secrets/anchor_api_key \
+OREOCHAIN_GATEWAY_URL=http://gateway:8787 \
+node server/anchor-worker.mjs
+```
+
+### What the operator has to supply
+
+| Setting | Required | What it is |
+|---|---|---|
+| `OREOCHAIN_CHAIN_RPC` | yes | JSON-RPC endpoint to submit through |
+| `OREOCHAIN_CONTRACT_ADDRESS` | yes | the deployed `ChunkedVerification` |
+| `OREOCHAIN_ANCHOR_KEY` / `_FILE` | yes | funded private key, `0x` + 64 hex |
+| `OREOCHAIN_ANCHOR_API_KEY` / `_FILE` | yes | a key in the gateway's `OREOCHAIN_ANCHOR_API_KEYS` |
+| `OREOCHAIN_GATEWAY_URL` | no | default `http://127.0.0.1:8787` |
+| `OREOCHAIN_ANCHOR_INTERVAL_MS` | no | default `60000` |
+| `OREOCHAIN_ANCHOR_CONFIRMATIONS` | no | default `3` |
+| `OREOCHAIN_ANCHOR_URI` | no | proof URL written into the anchor; `{root}` is substituted |
+| `OREOCHAIN_ANCHOR_PENDING_TIMEOUT_MS` | no | default `600000`, when to resend a transaction that never mined |
+
+Note the two different keys. `OREOCHAIN_ANCHOR_KEY` is the chain key that pays
+for transactions; `OREOCHAIN_ANCHOR_API_KEY` is how the worker authenticates to
+the gateway, and the gateway must list it in its own
+`OREOCHAIN_ANCHOR_API_KEYS`. Issue it to the worker alone, so it can be revoked
+without touching any client.
+
+Three things are true of the chain key beyond holding it: the address must be
+**funded**, it must be an **authorised exporter** on the contract
+(`addExporter(address, info)`, callable only by the contract owner), and it
+must be **nowhere near the gateway**. The worker is a separate process
+precisely so a key that can spend is not in the process that parses public
+uploads.
+
+None of the required settings has a default, and the worker names every one
+that is missing in a single line before exiting:
+
+```
+the anchoring worker cannot start, 2 setting(s) are missing:
+  OREOCHAIN_ANCHOR_KEY — the funded private key that signs anchor transactions (or OREOCHAIN_ANCHOR_KEY_FILE)
+  OREOCHAIN_ANCHOR_API_KEY — an OREOCHAIN_API_KEYS entry the worker authenticates to the gateway with
+```
+
+That is deliberate. The failure this replaces is the silent one: a worker that
+starts happily with no key, polls for ever, anchors nothing, and leaves every
+receipt it issued promising an anchor that is never coming.
+
+It then refuses to start if the contract address has no code on that chain, if
+its address is not an authorised exporter, or if the address holds no balance —
+each of which would otherwise show up only as a stream of reverted
+transactions you paid gas for.
+
+### How a tick works
+
+1. Ask the gateway what is unanchored. Anchor those first, oldest first.
+2. Only when nothing is outstanding, build a new batch if the gateway says the
+   queue should flush. Adding to a queue that is not draining turns one stuck
+   batch into a pile of them.
+3. For each batch: ask the **contract** whether that root is already anchored.
+   If it is and it is `OREOCHAIN_ANCHOR_CONFIRMATIONS` deep, recover the
+   transaction hash from the `BatchAnchored` log in that block and report it
+   back. If it is not anchored, send the transaction and return.
+
+No step waits for a transaction to mine. A submitted batch stays unanchored
+until it has confirmed, so the next tick picks it up, and a worker that dies in
+between recovers by asking the contract rather than by remembering anything.
+
+Confirmations are not decoration: a receipt records the transaction its proof
+points at, and a user does not come back to re-check. Reporting one block deep
+means a reorg can leave a whole batch of receipts pointing at a transaction
+that no longer exists. Three is a floor for a fast chain; a public L1 wants
+more.
+
+### When it goes wrong
+
+| Symptom | What it means | What to do |
+|---|---|---|
+| `cannot anchor against this chain` at startup | preflight failed | read the message: wrong address, unauthorised exporter, or no balance |
+| `cannot read unanchored batches` | the gateway is unreachable or the API key is wrong | the worker keeps ticking; fix and it catches up |
+| `returned 403` from the gateway | the worker's API key is not in `OREOCHAIN_ANCHOR_API_KEYS` | add it there and restart the gateway |
+| `a sent anchor never mined, resubmitting` | the transaction was dropped | usually gas; the contract rejects a duplicate anchor, so a resend is safe |
+| `anchored batch has no recoverable transaction hash` | the batch **is** anchored, but the RPC has pruned the log | `POST /api/proofs/anchored` with the hash by hand, from a block explorer |
+| `oreochain_documents_pending` climbing | nothing is being anchored | check the worker is running at all |
+
+Running two workers against one gateway is harmless but pointless: they race,
+the loser's transaction reverts with `AlreadyExists`, and gas is wasted. Run
+one.
 
 ## Deployment notes
 
@@ -304,7 +459,12 @@ directory the frontend needs, add it to `STATIC_DIRECTORIES` in
    several gateways today, give each its own store on storage it does not
    share. Running them against *one* store needs a backend that supports
    concurrent writers.
-10. **Put `OREOCHAIN_DB_PATH` on persistent storage and back it up.** It holds
+10. **Deploy the anchoring worker too, and only one of it.** The gateway
+   issues receipts that promise an anchor; the worker is what makes that true.
+   It needs no persistent storage of its own — everything it would remember,
+   it can ask the contract for — so it restarts and redeploys freely. See
+   [The anchoring worker](#the-anchoring-worker).
+11. **Put `OREOCHAIN_DB_PATH` on persistent storage and back it up.** It holds
    every recorded document and the ordered document list behind every anchored
    batch. That order is the only thing that can prove a document belongs to a
    root once the root is on-chain: lose the file and those documents stay
@@ -387,10 +547,15 @@ Honest list, so nobody assumes otherwise:
   matters: a bucket refills anyway, and the memory backend is for local
   development. Recorded documents and anchored batches *are* persisted — see
   `OREOCHAIN_DB_PATH` and the deployment note below.
-- **Anchor submission is manual.** The gateway builds the batch; something with
-  a funded key has to send the transaction. Until that is automated, a
-  document is anchored only when someone remembers — which for a service is
-  the gap that matters most.
+- **Anchoring is one worker, and a batch is anchored a minute or so after it
+  is built.** `OREOCHAIN_ANCHOR_INTERVAL_MS` plus the confirmation wait is the
+  delay between a receipt being issued and a transaction existing to back it.
+  That is the design — batching is what removes per-user gas — but a receipt
+  says nothing about *when* its anchor lands, so do not promise a user one.
+- **The worker does not manage gas.** It uses the RPC's estimate with a
+  margin. A chain in the middle of a fee spike may see the transaction sit in
+  the mempool until `OREOCHAIN_ANCHOR_PENDING_TIMEOUT_MS` expires and it is
+  resent at the price of the day. There is no bump-and-replace.
 - **A receipt proves the document matches its manifest, not that the manifest
   is honest.** See `POST /api/proofs/record` above for exactly where that line
   falls.
