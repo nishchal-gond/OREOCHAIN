@@ -40,10 +40,13 @@ const AES_NONCE_BYTES = 12;
 const XCHACHA_KEY_BYTES = 32;
 const XCHACHA_NONCE_BYTES = 24;
 
-// XChaCha20-Poly1305 is not part of WebCrypto, so it comes from @noble/ciphers.
-// The path resolves identically from a browser (served from the project root)
-// and from Node (on disk), so no bundler is required.
-const NOBLE_CHACHA_URL = "../../node_modules/@noble/ciphers/esm/chacha.js";
+// XChaCha20-Poly1305 is not part of WebCrypto, so it comes from @noble/ciphers,
+// vendored into js/vendor/noble because the published ESM imports its own
+// modules by package specifier and a browser cannot resolve those. See
+// scripts/vendor-noble.mjs. The path resolves identically from a browser
+// (served from the project root) and from Node (on disk), so no bundler is
+// required.
+const NOBLE_CHACHA_URL = "../vendor/noble/ciphers/chacha.js";
 
 let chachaImpl = null;
 
@@ -60,8 +63,8 @@ async function loadChaCha() {
     return chachaImpl;
   } catch (err) {
     throw new Error(
-      "XChaCha20-Poly1305 is unavailable. Run `npm install` so @noble/ciphers is " +
-        "present, or call registerChaCha() with an implementation. " +
+      "XChaCha20-Poly1305 is unavailable. Run `npm install && npm run vendor` so " +
+        "js/vendor/noble is present, or call registerChaCha() with an implementation. " +
         `(${err.message})`
     );
   }
