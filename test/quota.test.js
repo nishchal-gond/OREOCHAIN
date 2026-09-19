@@ -18,6 +18,7 @@ import { createHandler } from "../server/gateway.mjs";
 import { createLogger } from "../server/log.mjs";
 import { createMemoryBackend } from "../server/storage.mjs";
 import { CLIENT_BYTES, DAILY_BYTES, createQuota } from "../server/quota.mjs";
+import { REFUSAL_CODES } from "../server/gateway.mjs";
 
 const silent = createLogger({ level: "silent" });
 
@@ -327,6 +328,100 @@ test("behind a trusted proxy, visitors are metered apart; without one, together"
   } finally {
     await separate.stop();
   }
+});
+
+test("every refusal on the pin route says why in one machine-readable word", async () => {
+  /*
+   * Two status codes mean opposite things on this route. A 429 from the token
+   * bucket is "slow down"; a 429 from a byte cap is "not until your window
+   * rolls". A 503 from load shedding is "try in a second"; a 503 from the
+   * daily budget is "not today". A client that cannot tell them apart either
+   * retries a spent budget for ever, or tells someone the service is out of
+   * quota because two uploads overlapped for a second.
+   */
+  const seen = new Map();
+
+  const capped = await startGateway({
+    OREOCHAIN_CLIENT_BYTES_PER_WINDOW: "50",
+    OREOCHAIN_RATE_LIMIT_PER_MINUTE: "60",
+    OREOCHAIN_RATE_LIMIT_BURST: "2",
+  });
+  try {
+    await pin(capped, "x".repeat(40));
+    const overCap = await pin(capped, "x".repeat(40));
+    seen.set("client_quota", await overCap.json());
+    assert.equal(overCap.status, 429);
+
+    // Past the burst, the token bucket answers instead — same status, and it
+    // has to be distinguishable from the cap above.
+    let limited = null;
+    for (let i = 0; i < 6 && !limited; i++) {
+      const response = await pin(capped, "x");
+      if (response.status === 429) {
+        const body = await response.json();
+        if (body.code === "rate_limited") limited = body;
+      }
+    }
+    assert.ok(limited, "the token bucket never answered");
+    seen.set("rate_limited", limited);
+  } finally {
+    await capped.stop();
+  }
+
+  const plain = await startGateway();
+  try {
+    seen.set("bad_request", await (await pin(plain, "")).json());
+  } finally {
+    await plain.stop();
+  }
+
+  const spent = await startGateway({ OREOCHAIN_DAILY_BYTES: "10" });
+  try {
+    await pin(spent, "x".repeat(9));
+    const overBudget = await pin(spent, "x".repeat(9));
+    assert.equal(overBudget.status, 503);
+    seen.set("gateway_budget", await overBudget.json());
+  } finally {
+    await spent.stop();
+  }
+
+  const busy = await startGateway({}, { maxConcurrentUploads: 0 });
+  try {
+    const shed = await pin(busy, "x");
+    assert.equal(shed.status, 503);
+    seen.set("busy", await shed.json());
+  } finally {
+    await busy.stop();
+  }
+
+  const unauthorized = await startGateway({
+    OREOCHAIN_ALLOW_ANONYMOUS: "false",
+    OREOCHAIN_API_KEYS: "k".repeat(48),
+  });
+  try {
+    seen.set("unauthorized", await (await pin(unauthorized, "x")).json());
+  } finally {
+    await unauthorized.stop();
+  }
+
+  // Every refusal this route can produce, each with the code it must carry.
+  const allowed = new Set(Object.values(REFUSAL_CODES));
+  for (const [expected, body] of seen) {
+    assert.equal(body.code, expected, `wrong code on the ${expected} refusal`);
+    assert.ok(allowed.has(body.code), `${body.code} is not in REFUSAL_CODES`);
+  }
+
+  // The two pairs that share a status must not share a code, which is the
+  // whole reason the field exists.
+  assert.notEqual(seen.get("client_quota").code, seen.get("rate_limited").code);
+  assert.notEqual(seen.get("gateway_budget").code, seen.get("busy").code);
+
+  // And the codes are the closed set the README publishes, so a client can
+  // switch on them exhaustively.
+  assert.deepEqual(
+    [...allowed].sort(),
+    ["bad_request", "busy", "client_quota", "forbidden", "gateway_budget", "rate_limited", "unauthorized"]
+  );
 });
 
 test("the spend, and the proxy setting, are readable from /metrics", async () => {

@@ -106,6 +106,24 @@ to list. That is a backstop, not a licence.
 
 ## API
 
+Every refusal carries a `code`: one stable token from a closed set, so a
+client can decide what to do without matching on prose. It matters most where
+one status means two things — a `429` is "slow down" from the rate limiter and
+"not until your window rolls" from a byte cap, and a `503` is "try in a
+second" from load shedding and "not today" from the daily budget.
+
+| `code` | Typical status | What a client should do |
+|---|---|---|
+| `rate_limited` | 429 | Back off and retry; `Retry-After` says how long |
+| `client_quota` | 429 | Stop retrying until the window rolls over |
+| `busy` | 503 | Retry shortly; the gateway is at its concurrency ceiling |
+| `gateway_budget` | 503 | Stop for today; the service has spent its daily budget |
+| `unauthorized` | 401 | Fix the credential |
+| `forbidden` | 403 | The key is valid but not for this; see the message |
+| `bad_request` | 400 | Fix the request |
+
+The prose in `error` is for people and may change. The `code` will not.
+
 ### `GET /health`
 
 Unauthenticated liveness check: is the process running? Nothing more. Point a

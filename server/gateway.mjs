@@ -60,6 +60,29 @@ const ANCHOR_PAGE = 100;
  */
 const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]{1,64}$/;
 
+/**
+ * Why a request was refused, as one stable token a client can switch on.
+ *
+ * Status codes are not enough here, because two of them mean opposite things
+ * on the same route. A 429 from the token bucket means "slow down and try
+ * again"; a 429 from a per-window byte cap means "not until your window
+ * rolls". A 503 from load shedding means "try in a second"; a 503 from the
+ * daily budget means "not today". A client that cannot tell them apart either
+ * retries a spent budget in a loop, or tells a user the service is out of
+ * quota when two uploads happened to be in flight for a second.
+ *
+ * Prose is for people and changes freely. This does not.
+ */
+export const REFUSAL_CODES = Object.freeze({
+  RATE_LIMITED: "rate_limited",
+  BUSY: "busy",
+  CLIENT_QUOTA: "client_quota",
+  GATEWAY_BUDGET: "gateway_budget",
+  UNAUTHORIZED: "unauthorized",
+  FORBIDDEN: "forbidden",
+  BAD_REQUEST: "bad_request",
+});
+
 function requestId(req) {
   const supplied = req.headers["x-request-id"];
   if (typeof supplied === "string" && SAFE_REQUEST_ID.test(supplied)) return supplied;
@@ -633,7 +656,7 @@ export function createHandler(config, backend, deps = {}) {
 
       if (isApi) {
         if (!corsOk) {
-          fail(403, { error: "origin not allowed" });
+          fail(403, { code: REFUSAL_CODES.FORBIDDEN, error: "origin not allowed" });
           return;
         }
 
@@ -641,7 +664,7 @@ export function createHandler(config, backend, deps = {}) {
         if (!auth.ok) {
           // A uniform message avoids telling an attacker which part was wrong.
           res.setHeader("WWW-Authenticate", 'Bearer realm="oreochain"');
-          fail(401, { error: "unauthorized" });
+          fail(401, { code: REFUSAL_CODES.UNAUTHORIZED, error: "unauthorized" });
           log.warn("authentication failed", { reason: auth.reason, route });
           metrics.increment("oreochain_auth_failures_total", { reason: auth.reason });
           return;
@@ -655,6 +678,7 @@ export function createHandler(config, backend, deps = {}) {
         if (!allowance.allowed) {
           res.setHeader("Retry-After", String(allowance.retryAfterSeconds));
           fail(429, {
+            code: REFUSAL_CODES.RATE_LIMITED,
             error: "rate limit exceeded",
             retryAfterSeconds: allowance.retryAfterSeconds,
           });
@@ -669,7 +693,11 @@ export function createHandler(config, backend, deps = {}) {
             // retries — which the browser adapter does, with backoff — sees a
             // brief slowdown instead of a dead gateway.
             res.setHeader("Retry-After", "1");
-            fail(503, { error: "too many uploads in flight" }, { close: true });
+            fail(
+              503,
+              { code: REFUSAL_CODES.BUSY, error: "too many uploads in flight" },
+              { close: true }
+            );
             log.warn("upload shed, every slot busy", {
               keyId: auth.keyId,
               inFlight: inFlightUploads,
@@ -691,6 +719,7 @@ export function createHandler(config, backend, deps = {}) {
           if (!spend.allowed) {
             res.setHeader("Retry-After", String(spend.retryAfterSeconds));
             fail(spend.status, {
+              code: spend.code,
               error: spend.message,
               scope: spend.scope,
               retryAfterSeconds: spend.retryAfterSeconds,
@@ -711,7 +740,7 @@ export function createHandler(config, backend, deps = {}) {
               timeoutMs: config.readTimeoutMs,
             });
             if (body.length === 0) {
-              fail(400, { error: "empty body" });
+              fail(400, { code: REFUSAL_CODES.BAD_REQUEST, error: "empty body" });
               return;
             }
 
