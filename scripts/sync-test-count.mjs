@@ -40,21 +40,27 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = new URL("../", import.meta.url);
-const README = new URL("Readme.md", ROOT);
 
 /**
- * The two places the Readme states the size of the suite. Both live inside
- * fenced code blocks, where an HTML comment marker would render as visible
- * text, so the generated spans are anchored by their surrounding text instead.
+ * Every place the project states the size of the suite. Two are in the Readme,
+ * inside fenced code blocks where an HTML comment marker would render as
+ * visible text, and one is a headline figure on the landing page — which said
+ * 200 for long enough to be wrong by nearly half, and is read by more people
+ * than the Readme is.
  *
- * Each pattern must match exactly once. A pattern that stops matching — because
- * the prose around it was reworded — fails loudly rather than quietly updating
- * nothing, which is the failure mode that would put this script back where the
- * hand-written numbers started.
+ * Each pattern must match exactly once in its file. A pattern that stops
+ * matching — because the prose around it was reworded — fails loudly rather
+ * than quietly updating nothing, which is the failure mode that would put this
+ * script back where the hand-written numbers started.
  */
 const SITES = [
-  { name: "the repository map", pattern: /^(test\/\s+)(\d+)( tests,)/m },
-  { name: "the Tests section", pattern: /^(npm test\s+# )(\d+)( tests)$/m },
+  { file: "Readme.md", name: "the repository map", pattern: /^(test\/\s+)(\d+)( tests,)/m },
+  { file: "Readme.md", name: "the Tests section", pattern: /^(npm test\s+# )(\d+)( tests)$/m },
+  {
+    file: "index.html",
+    name: "the landing page statistics",
+    pattern: /(<h2>)(\d+)(<\/h2>\s*<p>AUTOMATED TESTS)/,
+  },
 ];
 
 /**
@@ -109,21 +115,23 @@ function countTests() {
   return Number(match[1]);
 }
 
-function apply(text, count) {
+function apply(text, count, sites, file) {
   const stale = [];
   let updated = text;
 
-  for (const site of SITES) {
+  for (const site of sites) {
     const matches = updated.match(new RegExp(site.pattern.source, "gm")) || [];
     if (matches.length !== 1) {
       throw new Error(
-        `expected exactly one test count in ${site.name} of Readme.md, found ${matches.length}. ` +
+        `expected exactly one test count in ${site.name} of ${file}, found ${matches.length}. ` +
           "The prose around it has changed; update scripts/sync-test-count.mjs to match."
       );
     }
 
     updated = updated.replace(site.pattern, (whole, before, found, after) => {
-      if (Number(found) !== count) stale.push(`${site.name}: says ${found}, the suite has ${count}`);
+      if (Number(found) !== count) {
+        stale.push(`${file}, ${site.name}: says ${found}, the suite has ${count}`);
+      }
       return `${before}${count}${after}`;
     });
   }
@@ -132,21 +140,41 @@ function apply(text, count) {
 }
 
 const check = process.argv.includes("--check");
-const original = fs.readFileSync(README, "utf8");
 const count = countTests();
-const { updated, stale } = apply(original, count);
+
+// The suite runs once, and every file that quotes its size is rewritten from
+// that one run.
+const files = [...new Set(SITES.map((site) => site.file))];
+const allStale = [];
+const written = [];
+
+for (const file of files) {
+  const target = new URL(file, ROOT);
+  const original = fs.readFileSync(target, "utf8");
+  const { updated, stale } = apply(
+    original,
+    count,
+    SITES.filter((site) => site.file === file),
+    file
+  );
+
+  allStale.push(...stale);
+  if (check || updated === original) continue;
+
+  fs.writeFileSync(target, updated);
+  written.push(file);
+}
 
 if (check) {
-  if (stale.length > 0) {
-    console.error("Readme.md states the wrong number of tests:");
-    for (const line of stale) console.error(`  - ${line}`);
+  if (allStale.length > 0) {
+    console.error("The test count is stated wrongly:");
+    for (const line of allStale) console.error(`  - ${line}`);
     console.error("\nRun 'npm run test-count' and commit the result.");
     process.exit(1);
   }
-  console.log(`Readme.md test count is current (${count}).`);
-} else if (updated === original) {
-  console.log(`Readme.md already says ${count} tests; nothing to write.`);
+  console.log(`Test counts are current (${count}) in ${files.join(", ")}.`);
+} else if (written.length === 0) {
+  console.log(`${files.join(", ")} already say ${count} tests; nothing to write.`);
 } else {
-  fs.writeFileSync(README, updated);
-  console.log(`Readme.md updated to ${count} tests.`);
+  console.log(`Updated ${written.join(", ")} to ${count} tests.`);
 }
