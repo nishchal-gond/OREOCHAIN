@@ -18,6 +18,17 @@ const CONTRACT = {
   address: null,
   chainId: null,
   explorer: "https://polygonscan.com",
+  /**
+   * A read-only JSON-RPC endpoint, so the chain can be read without a wallet.
+   *
+   * Reading a document's record is not a privileged act and needs no account,
+   * but until this existed the only provider the app could get was the one
+   * MetaMask injects. That made verification — the one thing a stranger comes
+   * here to do, holding a file someone sent them — require installing a wallet
+   * first. It is also what lets a document anchored by the gateway be checked
+   * by someone who has no wallet at all, which is the point of that path.
+   */
+  rpcUrl: null,
   ...(CONFIG.contract || {}),
 };
 
@@ -51,6 +62,51 @@ function configured() {
   return Boolean(CONTRACT.address) && !/^0x0+$/.test(CONTRACT.address);
 }
 
+/**
+ * The best chain connection this browser can make.
+ *
+ * A wallet is needed to *write* — registering or revoking a document, managing
+ * exporters. Everything else is a read, and a read only needs an RPC endpoint.
+ * Preferring the wallet when there is one keeps a signed-in user on the
+ * network they chose.
+ *
+ * @returns {{web3: object|null, wallet: boolean}} `wallet` is whether writes
+ *   are possible, which is not the same as whether reads are.
+ */
+function connectChain() {
+  if (window.ethereum) return { web3: new Web3(window.ethereum), wallet: true };
+  if (CONTRACT.rpcUrl) return { web3: new Web3(CONTRACT.rpcUrl), wallet: false };
+  return { web3: null, wallet: false };
+}
+
+/**
+ * Say what is missing, on the pages where it matters.
+ *
+ * A page that only reads is not broken by the absence of a wallet, and telling
+ * its visitor to install one is both wrong and the reason they leave. Pages
+ * that write are marked with `data-needs-wallet` on <body>.
+ */
+function chainNotice(wallet, readable) {
+  const alert = document.querySelector(".alert");
+  if (!alert) return;
+
+  const needsWallet = document.body.hasAttribute("data-needs-wallet");
+  const link = '<a target="_blank" rel="noopener" href="https://metamask.io/download">MetaMask</a>';
+
+  let message = null;
+  if (!wallet && needsWallet) {
+    message = `This page needs a browser wallet to sign a transaction. Install ${link}.`;
+  } else if (!readable) {
+    message =
+      "No way to reach the chain: install a wallet, or set " +
+      "<code>contract.rpcUrl</code> in <code>js/config.js</code> to a read-only " +
+      "RPC endpoint.";
+  }
+
+  alert.classList.toggle("d-none", message === null);
+  if (message) alert.innerHTML = message;
+}
+
 export function truncateAddress(address) {
   if (!address || address.length < 16) return address || "";
   return `${address.slice(0, 7)}…${address.slice(-8)}`;
@@ -76,7 +132,13 @@ function readableError(error) {
 
 export async function connect() {
   if (!window.ethereum) {
-    document.querySelector(".alert")?.classList.remove("d-none");
+    const alert = document.querySelector(".alert");
+    if (alert) {
+      alert.innerHTML =
+        'Connecting needs a browser wallet. Install <a target="_blank" rel="noopener" ' +
+        'href="https://metamask.io/download">MetaMask</a>.';
+      alert.classList.remove("d-none");
+    }
     return;
   }
   try {
@@ -298,20 +360,27 @@ window.addEventListener("load", async () => {
     );
   }
 
-  if (!window.ethereum) {
-    el("loginButton")?.classList.add("d-none");
-    el("logoutButton")?.classList.add("d-none");
-    document.querySelector(".alert")?.classList.remove("d-none");
+  const { web3, wallet } = connectChain();
+  if (web3) window.web3 = web3;
+  window.hasWallet = wallet;
+  chainNotice(wallet, Boolean(web3));
+
+  // Signing in is a wallet affair. Without one there is nobody to sign in as,
+  // but the page can still read the chain, so it carries on rather than
+  // returning here as it used to.
+  window.userAddress = wallet ? window.localStorage.getItem("userAddress") : null;
+  const signedIn = Boolean(window.userAddress && window.userAddress.length > 10);
+  el("loginButton")?.classList.toggle("d-none", !wallet || signedIn);
+  el("logoutButton")?.classList.toggle("d-none", !wallet || !signedIn);
+
+  if (!web3) return;
+
+  if (!signedIn) {
+    // Reads that do not depend on an account still belong on the page.
+    await get_ChainID();
+    if (configured()) await listen();
     return;
   }
-
-  window.web3 = new Web3(window.ethereum);
-  window.userAddress = window.localStorage.getItem("userAddress");
-
-  const signedIn = Boolean(window.userAddress && window.userAddress.length > 10);
-  el("loginButton")?.classList.toggle("d-none", signedIn);
-  el("logoutButton")?.classList.toggle("d-none", !signedIn);
-  if (!signedIn) return;
 
   const addressField = el("userAddress");
   if (addressField) {
