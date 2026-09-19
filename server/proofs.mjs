@@ -248,12 +248,30 @@ export async function createProofService(options = {}) {
       const proof = (await proofsForBatch(stored)).get(document.fileHash);
       if (!proof) return null;
 
-      // txHash and block are what lets a verifier find the transaction that
-      // carries this root. Without them they hold a proof and no way to check
-      // it against anything.
+      /*
+       * txHash and block are what lets a verifier find the transaction that
+       * carries this root. Without them they hold a proof and no way to check
+       * it against anything. batchSize travels with it so a verifier — or the
+       * gateway's own verification endpoint — can compare what the contract
+       * says the batch covers against what this store thinks it does.
+       */
+      const anchored = { ...proof, batchSize: stored.size };
       return stored.txHash
-        ? { ...proof, txHash: stored.txHash, block: stored.block }
-        : proof;
+        ? { ...anchored, txHash: stored.txHash, block: stored.block }
+        : anchored;
+    },
+
+    /**
+     * The signed receipt issued for a document, if there is one.
+     *
+     * Served alongside a proof so a verifier can check the gateway's
+     * signature over the document themselves, against the public key at
+     * /api/proofs/key, rather than taking the gateway's word that it once
+     * said so.
+     */
+    receiptFor(fileHash) {
+      const document = store.findDocument(String(fileHash).toLowerCase());
+      return document ? document.receipt : null;
     },
 
     listBatches() {
