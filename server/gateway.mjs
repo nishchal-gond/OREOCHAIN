@@ -610,11 +610,42 @@ export function createHandler(config, backend, deps = {}) {
       // Public proof endpoints, before the auth gate.
       if (proofs && req.method === "GET") {
         if (PUBLIC_API.has(url.pathname)) {
+          /*
+           * With a kid, the key that signed some particular receipt — which
+           * may be one this gateway has since rotated away from. A receipt is
+           * portable and long-lived, so someone can come back a year later
+           * with one, and serving only the current key would make every
+           * receipt issued before a rotation fail to verify, with the same
+           * answer a forgery gets.
+           */
+          const wanted = url.searchParams.get("kid");
+          if (wanted) {
+            const key = proofs.publicKeyFor(wanted);
+            if (!key) {
+              sendJson(res, 404, {
+                // Literal rather than the REFUSAL_CODES constant, which
+                // arrives on a sibling branch; the value is the same one.
+                code: "bad_request",
+                error: "this gateway has never signed with that key",
+                kid: wanted,
+              });
+              return;
+            }
+            sendJson(res, 200, {
+              kid: key.kid,
+              publicJwk: key.publicJwk,
+              algorithm: "ECDSA-P256-SHA256",
+              retiredAt: key.retiredAt,
+            });
+            return;
+          }
+
           sendJson(res, 200, {
             kid: proofs.kid,
             publicJwk: proofs.publicJwk,
             algorithm: "ECDSA-P256-SHA256",
             ephemeral: proofs.ephemeral,
+            keys: proofs.keys(),
           });
           return;
         }

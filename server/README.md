@@ -72,7 +72,9 @@ intend.
 | `OREOCHAIN_READ_TIMEOUT_MS` | `30000` | Request body timeout |
 | `OREOCHAIN_UPSTREAM_TIMEOUT_MS` | `60000` | Timeout for calls to the pinning service |
 | `OREOCHAIN_SERVE_STATIC` | `false` | Also serve the frontend, so there is no CORS at all |
-| `OREOCHAIN_RECEIPT_KEY` | — | Receipt signing key pair. Generate with `node scripts/generate-receipt-key.mjs`. |
+| `OREOCHAIN_RECEIPT_KEY` | — | Receipt signing key pair. Generate with `node scripts/generate-receipt-key.mjs`. Required. |
+| `OREOCHAIN_EPHEMERAL_RECEIPT_KEY` | `false` | Sign with a throwaway key instead. Development only; see below. |
+| `OREOCHAIN_KEYRING_PATH` | beside the store | Every public key that has signed a receipt here |
 | `OREOCHAIN_DB_PATH` | `./oreochain-proofs.log` | Recorded documents and anchored batches. `:memory:` for tests only. |
 | `OREOCHAIN_VERIFY_MANIFESTS` | `true` | Check a document against its manifest before signing a receipt for it |
 | `OREOCHAIN_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
@@ -294,7 +296,18 @@ deployment.
 
 ### `GET /api/proofs/key` — public
 
-The receipt verification key, as a JWK, plus its key id.
+The current verification key as a JWK, its key id, and `keys`: every key id
+this gateway has ever signed with, each marked current or retired.
+
+`GET /api/proofs/key?kid=<kid>` serves one of them by name, including retired
+ones, with the `retiredAt` timestamp. `404` if this gateway has never signed
+with it.
+
+That parameter is the whole point. A receipt names the key that signed it in
+`statement.kid`, and receipts are portable and long-lived — someone can come
+back a year later with one. Serving only the current key meant every receipt
+issued before a rotation failed to verify, giving the holder the same answer a
+forgery gets, with no way to tell which.
 
 ### `GET /api/proofs/inclusion/<fileHash>` — public
 
@@ -483,6 +496,29 @@ with the header while nothing was trusted. A non-zero count there with hops at
 `0` means there is a proxy in front of this gateway that the configuration
 does not know about.
 
+### Rotating the receipt key
+
+Receipts already issued must keep verifying, so rotation adds a key rather
+than replacing one:
+
+1. Generate a new pair: `node scripts/generate-receipt-key.mjs`.
+2. Put it in `OREOCHAIN_RECEIPT_KEY` (or the file `OREOCHAIN_RECEIPT_KEY_FILE`
+   points at) and restart. The drain is graceful, so this is a deploy rather
+   than an outage.
+3. That is all. The new key signs from now on; the old public key stays in the
+   keyring and `GET /api/proofs/key?kid=<old>` keeps serving it, so every
+   receipt already in someone's hands still verifies. The log says
+   `receipt signing key rotated` with both key ids.
+
+The keyring lives beside the proof store — `<OREOCHAIN_DB_PATH>.keys.json`
+unless `OREOCHAIN_KEYRING_PATH` says otherwise — and **belongs in the same
+backup**. Losing it means losing the ability to verify every receipt signed by
+a key you have since rotated away from. It holds public keys only: the signing
+key stays in the environment or a secret mount, which is what
+`OREOCHAIN_RECEIPT_KEY` is for.
+
+It is not a secret. Serving it is the point.
+
 ## Deployment notes
 
 1. **Run a supported Node.** The code works on Node 18, but 18 is past
@@ -497,10 +533,12 @@ does not know about.
 5. **Ship the logs somewhere.** Each line is JSON with a time, a level, a
    request id, a key digest (never the key), byte counts and CIDs. Scrape
    `/metrics` too, and alert on `oreochain_documents_pending`.
-6. **Set `OREOCHAIN_RECEIPT_KEY` before going live.** Without it the gateway
-   signs receipts with a throwaway key and warns at startup — every restart
-   then invalidates every receipt previously issued, because nobody can verify
-   them any more. Anchored batches are unaffected; they live on-chain.
+6. **Set `OREOCHAIN_RECEIPT_KEY`.** Without it the gateway refuses to start,
+   because the alternative is signing receipts with a throwaway key and
+   disowning every one of them at the next restart — and a holder cannot tell
+   that from a forgery. `OREOCHAIN_EPHEMERAL_RECEIPT_KEY=true` opts into it
+   for development, and says so in the log every time. Anchored batches are
+   unaffected either way; they live on-chain.
 7. Rate limits are per process and in memory. Behind multiple instances each
    enforces its own share; move to a shared store if you need a global limit.
    Authenticated callers are bucketed by key, anonymous ones by source address
@@ -626,8 +664,9 @@ Honest list, so nobody assumes otherwise:
 - **A receipt proves the document matches its manifest, not that the manifest
   is honest.** See `POST /api/proofs/record` above for exactly where that line
   falls.
-- **No key rotation without a restart.** Keys are read once at startup, from
-  the environment or from a `_FILE` mount. A rolling restart is graceful, so
-  rotation costs a deploy rather than an outage.
+- **Rotating the receipt key costs a restart.** Keys are read once at startup,
+  from the environment or a `_FILE` mount. A rolling restart is graceful, so
+  rotation costs a deploy rather than an outage — and receipts issued under
+  the old key keep verifying, because the keyring keeps it.
 - **No upload deduplication.** The same chunk pinned twice is pinned twice.
   (A document recorded twice is now deduplicated; chunks are not.)

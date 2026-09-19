@@ -25,6 +25,7 @@ import {
   proveWholeBatch,
 } from "../js/core/anchor.js";
 import { readSecret } from "./config.mjs";
+import { openKeyring } from "./keyring.mjs";
 import { openStore } from "./store.mjs";
 import {
   generateSigningKey,
@@ -63,6 +64,15 @@ export async function createProofService(options = {}) {
   }
 
   const kid = await keyId(publicKey);
+
+  /*
+   * Every public key that has ever signed here, so a receipt issued under a
+   * retired key still verifies. Without it, rotating the signing key — or
+   * restarting with an ephemeral one — turns every receipt already in
+   * someone's hands into something a holder cannot tell from a forgery.
+   */
+  const keyring = options.keyring || openKeyring({ path: options.keyringPath || ":memory:" });
+  keyring.use(kid, resolvedPublicJwk);
 
   const verifier = options.verifier || null;
   const store = options.store || openStore({ path: options.dbPath || ":memory:" });
