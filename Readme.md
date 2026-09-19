@@ -213,19 +213,44 @@ npm run dev            # http://127.0.0.1:8787
 For a real deployment:
 
 ```bash
-# 1. Deploy Contract/ChunkedVerification.sol (Remix, Hardhat or Foundry).
-#    The deploying wallet becomes the owner.
+# 1. Deploy Contract/ChunkedVerification.sol. The deploying wallet becomes
+#    the owner, and is the only account that can authorise exporters later.
+#    Both scripts print what they would do and send nothing without --confirm.
+export OREOCHAIN_CHAIN_RPC=https://rpc.example
+export OREOCHAIN_DEPLOY_KEY_FILE=./secrets/deploy_key
+npm run deploy-contract              # dry run
+npm run deploy-contract -- --confirm
 
-# 2. Point the frontend at it
+# 2. Authorise the addresses that may write to it. Only an exporter can
+#    register a document or anchor a batch, and the owner is not one by
+#    default — so this step is easy to skip and shows up later as every
+#    transaction reverting, after the gas is spent.
+export OREOCHAIN_CONTRACT_ADDRESS=0x…   # printed by step 1
+npm run add-exporter -- 0x<uploading wallet> "uploads" --confirm
+npm run add-exporter -- 0x<worker address> "anchor worker" --confirm
+
+# 3. Point the frontend at it
 cp js/config.example.js js/config.js     # gitignored; set contract.address
 
-# 3. Generate credentials for the gateway
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # API key
+# 4. Generate credentials for the gateway
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # a client key
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # the worker's key
 node scripts/generate-receipt-key.mjs                                      # receipt key
 
-# 4. Run it
-PINATA_JWT=… OREOCHAIN_API_KEYS=… OREOCHAIN_RECEIPT_KEY=… npm start
+# 5. Run the gateway
+PINATA_JWT=… OREOCHAIN_API_KEYS=<client>,<worker> \
+OREOCHAIN_ANCHOR_API_KEYS=<worker> OREOCHAIN_RECEIPT_KEY=… npm start
+
+# 6. Run the anchoring worker, which is what turns a receipt's promise into a
+#    transaction. Without it batches are built and never anchored.
+OREOCHAIN_CHAIN_RPC=… OREOCHAIN_CONTRACT_ADDRESS=… \
+OREOCHAIN_ANCHOR_KEY=<funded key, an authorised exporter> \
+OREOCHAIN_ANCHOR_API_KEY=<worker> node server/anchor-worker.mjs
 ```
+
+Both processes refuse to start rather than run half-configured, and each names
+what is missing. See [`server/README.md`](server/README.md) for every setting
+and what to do when one of them complains.
 
 Serve over HTTPS or `localhost` — WebCrypto is unavailable on other insecure
 origins, and every guarantee above rests on the page's integrity.
@@ -249,9 +274,17 @@ logged.
 | `POST /api/storage/pin` | key | Store one encrypted chunk |
 | `GET /api/storage/<cid>` | key | Retrieve one chunk |
 | `POST /api/proofs/record` | key | Issue a signed receipt, queue for anchoring |
-| `POST /api/proofs/batch` | key | Build a batch, return the root to anchor |
+| `POST /api/proofs/batch` | anchor key | Build a batch, return the root to anchor |
+| `GET /api/proofs/unanchored` | anchor key | Batches still owed a transaction |
+| `POST /api/proofs/anchored` | anchor key | Record where a root landed on-chain |
 | `GET /api/proofs/key` | **public** | Receipt verification key |
 | `GET /api/proofs/inclusion/<hash>` | **public** | Inclusion proof for a document |
+| `GET /ready` | — | Readiness; 503 while draining |
+| `GET /metrics` | key | Prometheus exposition |
+
+"Anchor key" is a narrower privilege than "key": only the anchoring worker's
+credential may declare a batch anchored, because the transaction hash that
+records is then served to everyone verifying a document in it.
 
 Verification endpoints are deliberately public. A court, an employer or a
 regulator checking a certificate has no account here and should not need one.
@@ -284,7 +317,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              420 tests, including EVM cross-checks
+test/                              426 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -329,7 +362,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test           # 420 tests
+npm test           # 426 tests
 npm run test:e2e   # the pages driven in a real browser (needs Playwright)
 npm run abi        # regenerate js/contract-abi.js after changing the contract
 npm run vendor     # regenerate js/vendor/noble after changing a @noble version
