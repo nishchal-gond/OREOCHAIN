@@ -8,10 +8,53 @@
  * operator did not intend.
  */
 
+import { readFileSync } from "node:fs";
+
+import { LEVELS } from "./log.mjs";
+
 const KIB = 1024;
 
-function readInt(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
-  const raw = process.env[name];
+/**
+ * Read a setting that may be supplied directly or through a file.
+ *
+ * `FOO_FILE=/run/secrets/foo` is how Docker, Kubernetes and systemd hand a
+ * secret to a process without putting it in the environment, where it is
+ * visible to anything that can read /proc, gets inherited by every child
+ * process, and turns up in `docker inspect` and crash dumps. Supporting it
+ * costs three lines and is the difference between this being deployable with
+ * a secret manager and not.
+ */
+export function readSecret(env, name) {
+  const fromFile = env[`${name}_FILE`];
+  if (!fromFile) return env[name] || null;
+
+  // Checked before the read, so the ambiguity is reported even when the file
+  // is also unreadable — that is the more useful of the two errors.
+  if (env[name]) {
+    throw new Error(
+      `both ${name} and ${name}_FILE are set — remove one, rather than leaving it ambiguous ` +
+        "which credential is in use"
+    );
+  }
+
+  let contents;
+  try {
+    contents = readFileSync(fromFile, "utf8");
+  } catch (error) {
+    throw new Error(
+      `${name}_FILE is set to "${fromFile}" but could not be read: ${error.message}`
+    );
+  }
+
+  // A file written by `echo` has a trailing newline; a credential with one
+  // appended fails authentication in a way that is miserable to diagnose.
+  const value = contents.trim();
+  if (!value) throw new Error(`${name}_FILE is set to "${fromFile}" but the file is empty`);
+  return value;
+}
+
+function readInt(env, name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = env[name];
   if (raw === undefined || raw === "") return fallback;
 
   const value = Number(raw);
@@ -21,115 +64,147 @@ function readInt(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}
   return value;
 }
 
-function readList(name, fallback = []) {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return fallback;
+function readList(env, name, fallback = []) {
+  const raw = readSecret(env, name);
+  if (raw === undefined || raw === null || raw === "") return fallback;
   return raw
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
-export function loadConfig(env = process.env) {
-  const previous = process.env;
-  process.env = env;
-
-  try {
-    const apiKeys = readList("OREOCHAIN_API_KEYS");
-    const allowAnonymous = env.OREOCHAIN_ALLOW_ANONYMOUS === "true";
-
-    if (apiKeys.length === 0 && !allowAnonymous) {
-      throw new Error(
-        "No API keys configured. Set OREOCHAIN_API_KEYS to a comma-separated list, " +
-          "or set OREOCHAIN_ALLOW_ANONYMOUS=true if this gateway is genuinely public."
-      );
-    }
-    for (const key of apiKeys) {
-      if (key.length < 32) {
-        throw new Error(
-          `API keys must be at least 32 characters; one is ${key.length}. ` +
-            "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
-        );
-      }
-    }
-
-    const pinataJwt = env.PINATA_JWT || null;
-    if (!pinataJwt && env.OREOCHAIN_STORAGE !== "memory") {
-      throw new Error(
-        "PINATA_JWT is not set. Set it, or set OREOCHAIN_STORAGE=memory for local testing."
-      );
-    }
-
-    return {
-      port: readInt("PORT", 8787, { min: 1, max: 65535 }),
-      host: env.HOST || "127.0.0.1",
-
-      apiKeys,
-      allowAnonymous,
-
-      storage: env.OREOCHAIN_STORAGE === "memory" ? "memory" : "pinata",
-      pinataJwt,
-
-      /**
-       * A chunk is 256 KiB of plaintext plus AEAD overhead. 1 MiB leaves room
-       * for a larger configured chunk size without allowing arbitrary bodies.
-       */
-      maxChunkBytes: readInt("OREOCHAIN_MAX_CHUNK_BYTES", KIB * KIB, {
-        min: KIB,
-        max: 64 * KIB * KIB,
-      }),
-
-      /**
-       * How many request bodies may be buffered at once, process-wide.
-       *
-       * The per-request cap bounds one body; nothing bounded how many are in
-       * flight. A token bucket does not help — a burst of 120 spends fine in
-       * parallel — so at the default chunk cap that was ~360 MiB from one
-       * well-behaved client, and 23 GiB at a 64 MiB chunk cap. Past this the
-       * gateway sheds load with a 503 instead of running the host out of
-       * memory.
-       */
-      maxConcurrentUploads: readInt("OREOCHAIN_MAX_CONCURRENT_UPLOADS", 32, { min: 1 }),
-
-      /** Token bucket: sustained rate and burst, per API key. */
-      rateLimitPerMinute: readInt("OREOCHAIN_RATE_LIMIT_PER_MINUTE", 600, { min: 1 }),
-      rateLimitBurst: readInt("OREOCHAIN_RATE_LIMIT_BURST", 120, { min: 1 }),
-
-      /**
-       * Browser origins allowed to call this gateway. Empty means same-origin
-       * only — no CORS headers are sent, so no cross-origin page can read a
-       * response. "*" is rejected because these endpoints are authenticated.
-       */
-      allowedOrigins: readList("OREOCHAIN_ALLOWED_ORIGINS"),
-
-      readTimeoutMs: readInt("OREOCHAIN_READ_TIMEOUT_MS", 30_000, { min: 1000 }),
-      upstreamTimeoutMs: readInt("OREOCHAIN_UPSTREAM_TIMEOUT_MS", 60_000, { min: 1000 }),
-
-      gateways: readList("OREOCHAIN_IPFS_GATEWAYS", [
-        "https://gateway.pinata.cloud/ipfs/",
-        "https://ipfs.io/ipfs/",
-        "https://cloudflare-ipfs.com/ipfs/",
-      ]),
-
-      /** Serve the static frontend from the repository root. */
-      serveStatic: env.OREOCHAIN_SERVE_STATIC === "true",
-
-      /**
-       * Where recorded documents and built batches are kept.
-       *
-       * Durable by default. An anchored batch's ordered document list is the
-       * only thing that can prove a document is in it, so holding it in memory
-       * means a restart leaves documents anchored on-chain and unprovable.
-       * ":memory:" opts back into that, for tests.
-       */
-      dbPath: env.OREOCHAIN_DB_PATH || "./oreochain-proofs.log",
-    };
-  } finally {
-    process.env = previous;
+function readLevel(env, name, fallback) {
+  const raw = (env[name] || fallback).toLowerCase();
+  if (!(raw in LEVELS)) {
+    throw new Error(`${name} must be one of ${Object.keys(LEVELS).join(", ")}, got "${raw}"`);
   }
+  return raw;
 }
 
-export function assertSafeConfig(config) {
+export function loadConfig(env = process.env) {
+  const apiKeys = readList(env, "OREOCHAIN_API_KEYS");
+  const allowAnonymous = env.OREOCHAIN_ALLOW_ANONYMOUS === "true";
+
+  if (apiKeys.length === 0 && !allowAnonymous) {
+    throw new Error(
+      "No API keys configured. Set OREOCHAIN_API_KEYS to a comma-separated list, " +
+        "or set OREOCHAIN_ALLOW_ANONYMOUS=true if this gateway is genuinely public."
+    );
+  }
+  for (const key of apiKeys) {
+    if (key.length < 32) {
+      throw new Error(
+        `API keys must be at least 32 characters; one is ${key.length}. ` +
+          "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+      );
+    }
+  }
+
+  const pinataJwt = readSecret(env, "PINATA_JWT");
+  if (!pinataJwt && env.OREOCHAIN_STORAGE !== "memory") {
+    throw new Error(
+      "PINATA_JWT is not set. Set it, or set OREOCHAIN_STORAGE=memory for local testing."
+    );
+  }
+
+  return {
+    port: readInt(env, "PORT", 8787, { min: 1, max: 65535 }),
+    host: env.HOST || "127.0.0.1",
+
+    apiKeys,
+    allowAnonymous,
+
+    storage: env.OREOCHAIN_STORAGE === "memory" ? "memory" : "pinata",
+    pinataJwt,
+
+    /**
+     * A chunk is 256 KiB of plaintext plus AEAD overhead. 1 MiB leaves room
+     * for a larger configured chunk size without allowing arbitrary bodies.
+     */
+    maxChunkBytes: readInt(env, "OREOCHAIN_MAX_CHUNK_BYTES", KIB * KIB, {
+      min: KIB,
+      max: 64 * KIB * KIB,
+    }),
+
+    /**
+     * How many request bodies may be buffered at once, process-wide.
+     *
+     * The per-request cap bounds one body; nothing bounded how many are in
+     * flight. A token bucket does not help — a burst of 120 spends fine in
+     * parallel — so at the default chunk cap that was ~360 MiB from one
+     * well-behaved client, and 23 GiB at a 64 MiB chunk cap. Past this the
+     * gateway sheds load with a 503 instead of running the host out of
+     * memory.
+     */
+    maxConcurrentUploads: readInt(env, "OREOCHAIN_MAX_CONCURRENT_UPLOADS", 32, { min: 1 }),
+
+    /** Token bucket: sustained rate and burst, per API key. */
+    rateLimitPerMinute: readInt(env, "OREOCHAIN_RATE_LIMIT_PER_MINUTE", 600, { min: 1 }),
+    rateLimitBurst: readInt(env, "OREOCHAIN_RATE_LIMIT_BURST", 120, { min: 1 }),
+
+    /**
+     * Browser origins allowed to call this gateway. Empty means same-origin
+     * only — no CORS headers are sent, so no cross-origin page can read a
+     * response. "*" is rejected because these endpoints are authenticated.
+     */
+    allowedOrigins: readList(env, "OREOCHAIN_ALLOWED_ORIGINS"),
+
+    readTimeoutMs: readInt(env, "OREOCHAIN_READ_TIMEOUT_MS", 30_000, { min: 1000 }),
+    upstreamTimeoutMs: readInt(env, "OREOCHAIN_UPSTREAM_TIMEOUT_MS", 60_000, { min: 1000 }),
+
+    gateways: readList(env, "OREOCHAIN_IPFS_GATEWAYS", [
+      "https://gateway.pinata.cloud/ipfs/",
+      "https://ipfs.io/ipfs/",
+      "https://cloudflare-ipfs.com/ipfs/",
+    ]),
+
+    /** Serve the static frontend from the repository root. */
+    serveStatic: env.OREOCHAIN_SERVE_STATIC === "true",
+
+    /**
+     * Where recorded documents and built batches are kept.
+     *
+     * Durable by default. An anchored batch's ordered document list is the
+     * only thing that can prove a document is in it, so holding it in memory
+     * means a restart leaves documents anchored on-chain and unprovable.
+     * ":memory:" opts back into that, for tests.
+     */
+    dbPath: env.OREOCHAIN_DB_PATH || "./oreochain-proofs.log",
+
+    /**
+     * How much the service says. "info" is one line per request outcome;
+     * "warn" is problems only; "debug" adds per-request detail that is too
+     * chatty to leave on. Validated here so a typo fails at startup rather
+     * than silently losing every log line.
+     */
+    logLevel: readLevel(env, "OREOCHAIN_LOG_LEVEL", "info"),
+
+    /**
+     * How long to keep serving after SIGTERM before the listener closes.
+     *
+     * Readiness is only useful if something gets to observe it. An
+     * orchestrator notices an instance is unready on its next probe, which is
+     * seconds away; closing the listener in the same tick as flipping the flag
+     * means traffic is still being routed here when the socket goes, and those
+     * requests fail. This window is the gap between "stop sending me work" and
+     * "I have stopped listening".
+     *
+     * Zero by default so a local Ctrl-C stays instant. In Kubernetes set it to
+     * a little more than the readiness probe interval.
+     */
+    shutdownDelayMs: readInt(env, "OREOCHAIN_SHUTDOWN_DELAY_MS", 0, { min: 0, max: 120_000 }),
+  };
+}
+
+/**
+ * Refuse settings that are unsafe, and warn about settings that are merely
+ * dangerous.
+ *
+ * @param {object} config from loadConfig()
+ * @param {{warn: (message: string, fields?: object) => void}} [sink] where
+ *   warnings go; defaults to console so this stays usable from a script
+ */
+export function assertSafeConfig(config, sink = { warn: (message) => console.warn(message) }) {
   if (config.allowedOrigins.includes("*")) {
     throw new Error(
       'OREOCHAIN_ALLOWED_ORIGINS must not be "*" — these endpoints are authenticated, ' +
@@ -137,22 +212,20 @@ export function assertSafeConfig(config) {
     );
   }
   if (config.allowAnonymous && config.storage === "pinata") {
-    console.warn(
-      "[oreochain] WARNING: anonymous access is enabled and uploads are billed to your " +
-        "Pinata account. Anyone who can reach this port can spend your quota."
+    sink.warn(
+      "anonymous access is enabled and uploads are billed to your Pinata account: anyone " +
+        "who can reach this port can spend your quota"
     );
   }
   if (config.dbPath === ":memory:") {
-    console.warn(
-      "[oreochain] WARNING: OREOCHAIN_DB_PATH is \":memory:\", so recorded documents and " +
-        "anchored batches are lost on restart. A document anchored on-chain then has no " +
-        "recoverable inclusion proof. Point it at a file on persistent storage."
+    sink.warn(
+      'OREOCHAIN_DB_PATH is ":memory:", so recorded documents and anchored batches are lost ' +
+        "on restart. A document anchored on-chain then has no recoverable inclusion proof. " +
+        "Point it at a file on persistent storage."
     );
   }
   if (config.host === "0.0.0.0" && config.allowAnonymous) {
-    console.warn(
-      "[oreochain] WARNING: listening on all interfaces with anonymous access enabled."
-    );
+    sink.warn("listening on all interfaces with anonymous access enabled");
   }
   return config;
 }

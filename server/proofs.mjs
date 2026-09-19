@@ -24,6 +24,7 @@ import {
   buildBatch,
   proveWholeBatch,
 } from "../js/core/anchor.js";
+import { readSecret } from "./config.mjs";
 import { openStore } from "./store.mjs";
 import {
   generateSigningKey,
@@ -246,7 +247,10 @@ function normalizeDocument(document) {
 
 /** Parse a signing key pair from the environment, if one is configured. */
 export function readSigningKey(env = process.env) {
-  const raw = env.OREOCHAIN_RECEIPT_KEY;
+  // Also accepts OREOCHAIN_RECEIPT_KEY_FILE. This key signs every receipt the
+  // service issues, so it is the one secret most worth keeping out of the
+  // environment, where `docker inspect` and every child process can read it.
+  const raw = readSecret(env, "OREOCHAIN_RECEIPT_KEY");
   if (!raw) return { privateJwk: null, publicJwk: null };
 
   let parsed;

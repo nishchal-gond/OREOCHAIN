@@ -15,6 +15,7 @@ import { createHandler, _internals as gatewayInternals } from "../server/gateway
 import { createMemoryBackend } from "../server/storage.mjs";
 import { authenticate, extractToken } from "../server/auth.mjs";
 import { createRateLimiter } from "../server/ratelimit.mjs";
+import { createLogger } from "../server/log.mjs";
 
 import { equalBytes, fromUtf8, randomBytes, utf8 } from "../js/core/bytes.js";
 import { createPinataAdapter, putAll } from "../js/storage/ipfs.js";
@@ -46,7 +47,7 @@ async function startGateway(envOverrides = {}, deps = {}) {
   const backend = deps.backend || createMemoryBackend();
   const proofs = deps.proofs === false ? null : deps.proofs || (await createProofService());
   const handler = createHandler(config, backend, {
-    log: () => {},
+    logger: createLogger({ level: "silent" }),
     sweeper: false,
     ...deps,
     proofs,
@@ -206,8 +207,12 @@ test("API endpoints reject unauthenticated requests", async () => {
       const response = await fetch(`${gw.url}${path}`, init);
       assert.equal(response.status, 401, `${path} was not protected`);
       assert.match(response.headers.get("www-authenticate") || "", /Bearer/);
-      // The error must not hint at which part was wrong.
-      assert.deepEqual(await response.json(), { error: "unauthorized" });
+      // The error must not hint at which part was wrong. The request id is
+      // the only other field, and it identifies the request rather than
+      // saying anything about the credential.
+      const body = await response.json();
+      assert.equal(body.error, "unauthorized");
+      assert.deepEqual(Object.keys(body).sort(), ["error", "requestId"]);
     }
   } finally {
     await gw.stop();
@@ -580,6 +585,144 @@ test("health reports how many uploads are in flight", async () => {
   try {
     const body = await (await fetch(`${gw.url}/health`)).json();
     assert.equal(body.inFlightUploads, 0);
+  } finally {
+    await gw.stop();
+  }
+});
+
+// ------------------------------------------------- readiness and observability
+
+test("readiness is a separate answer from liveness", async () => {
+  const gw = await startGateway();
+  try {
+    // Liveness says the process is up. Readiness says it should be sent
+    // traffic. Conflating them is how a draining instance keeps receiving
+    // requests, and how a dependency outage turns into a crash loop.
+    assert.equal((await fetch(`${gw.url}/health`)).status, 200);
+
+    const ready = await fetch(`${gw.url}/ready`);
+    assert.equal(ready.status, 200);
+    assert.equal((await ready.json()).status, "ready");
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a draining instance fails readiness while still answering liveness", async () => {
+  const readiness = { draining: false };
+  const gw = await startGateway({}, { readiness });
+  try {
+    readiness.draining = true;
+
+    const ready = await fetch(`${gw.url}/ready`);
+    assert.equal(ready.status, 503, "a draining instance still invited traffic");
+    assert.equal((await ready.json()).draining, true);
+
+    // Still alive — an orchestrator must stop routing, not restart it.
+    assert.equal((await fetch(`${gw.url}/health`)).status, 200);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("readiness fails when the proof store cannot answer", async () => {
+  const broken = {
+    kid: "test",
+    publicJwk: {},
+    status() {
+      throw new Error("store is closed");
+    },
+    proofFor: async () => null,
+    close() {},
+  };
+
+  const gw = await startGateway({}, { proofs: broken });
+  try {
+    const response = await fetch(`${gw.url}/ready`);
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).store, /store is closed/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("metrics are behind the same key as the API", async () => {
+  const gw = await startGateway();
+  try {
+    // Request volume, error rates and queue depth are operational shape. A
+    // gateway with keys should not hand them to anyone who asks.
+    assert.equal((await fetch(`${gw.url}/metrics`)).status, 401);
+    assert.equal((await fetch(`${gw.url}/metrics`, { headers: authed() })).status, 200);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("metrics count what actually happened", async () => {
+  const gw = await startGateway();
+  try {
+    await fetch(`${gw.url}/api/storage/pin`, {
+      method: "POST",
+      headers: { ...authed(), "Content-Type": "application/octet-stream" },
+      body: new Uint8Array([1, 2, 3, 4]),
+    });
+    await fetch(`${gw.url}/api/storage/pin`, { method: "POST", body: "x" }); // unauthorised
+
+    const body = await (await fetch(`${gw.url}/metrics`, { headers: authed() })).text();
+    assert.match(body, /oreochain_requests_total\{route="pin",status="2xx"\} 1/);
+    assert.match(body, /oreochain_auth_failures_total/);
+    assert.match(body, /oreochain_bytes_pinned_total\S* 4/);
+    assert.match(body, /oreochain_uploads_in_flight 0/);
+    assert.match(body, /oreochain_documents_pending 0/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a request id is returned, so a user can quote one that identifies theirs", async () => {
+  const gw = await startGateway();
+  try {
+    const generated = await fetch(`${gw.url}/health`);
+    assert.match(generated.headers.get("x-request-id"), /^[0-9a-f-]{36}$/);
+
+    // A client or an edge proxy that already has an id keeps it, so one trace
+    // spans both sides.
+    const supplied = await fetch(`${gw.url}/health`, { headers: { "X-Request-Id": "edge-42" } });
+    assert.equal(supplied.headers.get("x-request-id"), "edge-42");
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("an error response carries the id that finds it in the log", async () => {
+  const gw = await startGateway();
+  try {
+    const response = await fetch(`${gw.url}/api/nope`, { headers: authed() });
+    const body = await response.json();
+    assert.equal(body.requestId, response.headers.get("x-request-id"));
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("the log line for a request carries its id and no credential", async () => {
+  const lines = [];
+  const gw = await startGateway(
+    {},
+    { logger: createLogger({ level: "debug", write: (line) => lines.push(line) }) }
+  );
+  try {
+    await fetch(`${gw.url}/api/storage/pin`, {
+      method: "POST",
+      headers: { ...authed(), "X-Request-Id": "trace-9" },
+      body: new Uint8Array([1, 2, 3]),
+    });
+
+    const pinned = lines.map((line) => JSON.parse(line)).find((e) => e.msg === "pinned");
+    assert.ok(pinned, "the upload produced no log line");
+    assert.equal(pinned.reqId, "trace-9");
+    assert.equal(pinned.bytes, 3);
+    assert.equal(lines.join("\n").includes(KEY), false, "an api key reached the log");
   } finally {
     await gw.stop();
   }

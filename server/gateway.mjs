@@ -15,15 +15,20 @@
  *
  * Endpoints:
  *   GET  /health                 liveness, unauthenticated
+ *   GET  /ready                  readiness — safe to send traffic to
+ *   GET  /metrics                Prometheus exposition, authenticated
  *   POST /api/storage/pin        store one chunk (raw body) -> { cid }
  *   GET  /api/storage/<cid>      retrieve one chunk
  */
 
+import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 
 import { authenticate } from "./auth.mjs";
+import { createLogger } from "./log.mjs";
+import { createMetrics } from "./metrics.mjs";
 import { createRateLimiter } from "./ratelimit.mjs";
 
 const CID_ROUTE = /^\/api\/storage\/([A-Za-z0-9_-]{1,512})$/;
@@ -38,6 +43,35 @@ const PUBLIC_API = new Set(["/api/proofs/key"]);
 
 /** JSON bodies are metadata, not payloads, so they get a much tighter cap. */
 const MAX_JSON_BYTES = 64 * 1024;
+
+/**
+ * A client-supplied request id is echoed and logged, so it has to be inert:
+ * bounded, and made only of characters that cannot break a header, forge a log
+ * field or inject a newline into the JSON line it lands in.
+ */
+const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]{1,64}$/;
+
+function requestId(req) {
+  const supplied = req.headers["x-request-id"];
+  if (typeof supplied === "string" && SAFE_REQUEST_ID.test(supplied)) return supplied;
+  return randomUUID();
+}
+
+/**
+ * The route label a request is counted under.
+ *
+ * Deliberately not the path: a cid or a file hash in a metric label makes one
+ * time series per document, which is how a metrics backend is destroyed.
+ */
+function routeLabel(pathname, method) {
+  if (pathname === "/health" || pathname === "/ready" || pathname === "/metrics") return pathname;
+  if (pathname === "/api/storage/pin") return "pin";
+  if (CID_ROUTE.test(pathname)) return "fetch";
+  if (pathname.startsWith("/api/proofs/inclusion/")) return "inclusion";
+  if (pathname.startsWith("/api/proofs/")) return pathname.slice("/api/".length);
+  if (pathname.startsWith("/api/")) return "unknown_api";
+  return method === "GET" ? "static" : "other";
+}
 
 /**
  * Directories the frontend is served from, relative to the static root.
@@ -288,7 +322,16 @@ export function createHandler(config, backend, deps = {}) {
     ? path.resolve(deps.staticRoot || path.resolve(process.cwd()))
     : null;
 
-  const log = deps.log || ((entry) => console.log(JSON.stringify(entry)));
+  const logger = deps.logger || createLogger({ level: config.logLevel });
+  const metrics = deps.metrics || createMetrics();
+
+  /*
+   * Whether this process should be sent traffic. index.mjs flips `draining` on
+   * SIGTERM, which is the point of having readiness at all: a rolling deploy
+   * takes the instance out of the load balancer *before* the drain rather than
+   * discovering it is gone when requests start failing.
+   */
+  const readiness = deps.readiness || { draining: false };
 
   /*
    * Bodies buffered right now, process-wide. The per-request cap bounds one
@@ -300,6 +343,41 @@ export function createHandler(config, backend, deps = {}) {
   let inFlightUploads = 0;
   const maxConcurrentUploads = deps.maxConcurrentUploads ?? config.maxConcurrentUploads ?? 32;
 
+  metrics.gauge(
+    "oreochain_uploads_in_flight",
+    () => inFlightUploads,
+    "Request bodies buffered right now"
+  );
+  metrics.gauge(
+    "oreochain_upload_slots",
+    () => maxConcurrentUploads,
+    "Ceiling on concurrently buffered bodies"
+  );
+  if (proofs) {
+    // The pending count is the one number that silently grows into an
+    // incident: documents are receipted but nothing is anchoring them, and
+    // nothing else in the system says so.
+    metrics.gauge(
+      "oreochain_documents_pending",
+      () => proofs.status().pending,
+      "Recorded documents not yet in a batch"
+    );
+    metrics.gauge(
+      "oreochain_documents_total",
+      () => proofs.status().documents,
+      "Documents recorded since the store was created"
+    );
+    metrics.gauge("oreochain_batches_total", () => proofs.status().batches, "Batches built");
+  }
+
+  const METRIC_HELP = {
+    oreochain_requests_total: "Requests completed, by route and status class",
+    oreochain_auth_failures_total: "Requests rejected for a missing or invalid key",
+    oreochain_rate_limited_total: "Requests rejected by the token bucket",
+    oreochain_uploads_shed_total: "Uploads rejected because every slot was busy",
+    oreochain_bytes_pinned_total: "Bytes accepted for pinning",
+  };
+
   // Idle rate-limit buckets are swept periodically so memory stays bounded.
   const sweeper = deps.sweeper === false ? null : setInterval(() => limiter.sweep(), 600000);
   if (sweeper && typeof sweeper.unref === "function") sweeper.unref();
@@ -308,13 +386,53 @@ export function createHandler(config, backend, deps = {}) {
     const started = Date.now();
     securityHeaders(res);
 
+    /*
+     * One id, carried on every line this request produces and handed back to
+     * the client. A user reporting "it failed at about two o'clock" is very
+     * hard to find in a log; a user quoting an id is one grep.
+     */
+    const reqId = requestId(req);
+    res.setHeader("X-Request-Id", reqId);
+    const log = logger.child({ reqId });
+
+    /*
+     * Every failure carries its id in the body as well as the header. A user
+     * reporting a problem pastes what they saw, and what they saw is the JSON;
+     * with the id in it, the line that explains their failure is one grep away
+     * instead of a hunt through a timestamp range.
+     */
+    const fail = (status, payload, options) =>
+      sendJson(res, status, { ...payload, requestId: reqId }, options);
+
     let url;
     try {
       url = new URL(req.url, "http://localhost");
     } catch {
-      sendJson(res, 400, { error: "malformed request URL" });
+      log.warn("malformed request URL", { method: req.method });
+      metrics.increment("oreochain_requests_total", { route: "other", status: "4xx" });
+      fail(400, { error: "malformed request URL" });
       return;
     }
+
+    const route = routeLabel(url.pathname, req.method);
+    let counted = false;
+    const countOnce = (status) => {
+      if (counted) return;
+      counted = true;
+      metrics.increment("oreochain_requests_total", {
+        route,
+        status: `${Math.floor(status / 100)}xx`,
+      });
+    };
+    res.on("finish", () => countOnce(res.statusCode));
+    // A connection dropped before the response was written would otherwise be
+    // invisible — the one class of failure a client notices and the server
+    // does not.
+    res.on("close", () => {
+      if (counted) return;
+      counted = true;
+      metrics.increment("oreochain_requests_total", { route, status: "aborted" });
+    });
 
     const corsOk = applyCors(req, res, config);
 
@@ -324,6 +442,11 @@ export function createHandler(config, backend, deps = {}) {
     }
 
     try {
+      /*
+       * Liveness: is this process running? Nothing else. A liveness probe that
+       * checks a dependency gets the container killed and restarted when the
+       * dependency is down, which turns one outage into a crash loop.
+       */
       if (url.pathname === "/health" && req.method === "GET") {
         sendJson(res, 200, {
           status: "ok",
@@ -331,6 +454,54 @@ export function createHandler(config, backend, deps = {}) {
           uptime: process.uptime(),
           inFlightUploads,
         });
+        return;
+      }
+
+      /*
+       * Readiness: should this instance be sent traffic? That is a different
+       * question, and until now nothing answered it.
+       *
+       * It checks what this process controls — it is not draining, and the
+       * proof store it must write to before issuing a receipt is readable.
+       * It deliberately does not probe Pinata: an upstream wobble would fail
+       * readiness on every replica at once and take the whole service out for
+       * a dependency that only affects one endpoint.
+       */
+      if (url.pathname === "/ready" && req.method === "GET") {
+        const checks = { draining: readiness.draining === true, store: "ok" };
+        if (proofs) {
+          try {
+            proofs.status();
+          } catch (error) {
+            checks.store = error.message;
+          }
+        }
+        const ready = !checks.draining && checks.store === "ok";
+        if (!ready) log.warn("not ready", checks);
+        sendJson(res, ready ? 200 : 503, { status: ready ? "ready" : "not ready", ...checks });
+        return;
+      }
+
+      /*
+       * Metrics carry operational shape — request volume, error rates, how
+       * much is queued — so they go behind the same key as the API whenever
+       * the gateway has keys at all. A scraper sends a bearer token like any
+       * other client.
+       */
+      if (url.pathname === "/metrics" && req.method === "GET") {
+        const auth = authenticate(req, config);
+        if (!auth.ok) {
+          res.setHeader("WWW-Authenticate", 'Bearer realm="oreochain"');
+          fail(401, { error: "unauthorized" });
+          return;
+        }
+        const body = metrics.render(METRIC_HELP);
+        res.writeHead(200, {
+          "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+          "Content-Length": Buffer.byteLength(body),
+          "Cache-Control": "no-store",
+        });
+        res.end(body);
         return;
       }
 
@@ -362,7 +533,7 @@ export function createHandler(config, backend, deps = {}) {
 
       if (isApi) {
         if (!corsOk) {
-          sendJson(res, 403, { error: "origin not allowed" });
+          fail(403, { error: "origin not allowed" });
           return;
         }
 
@@ -370,8 +541,9 @@ export function createHandler(config, backend, deps = {}) {
         if (!auth.ok) {
           // A uniform message avoids telling an attacker which part was wrong.
           res.setHeader("WWW-Authenticate", 'Bearer realm="oreochain"');
-          sendJson(res, 401, { error: "unauthorized" });
-          log({ event: "auth_failed", reason: auth.reason, path: url.pathname });
+          fail(401, { error: "unauthorized" });
+          log.warn("authentication failed", { reason: auth.reason, route });
+          metrics.increment("oreochain_auth_failures_total", { reason: auth.reason });
           return;
         }
 
@@ -384,11 +556,12 @@ export function createHandler(config, backend, deps = {}) {
         const quota = limiter.take(quotaKey);
         if (!quota.allowed) {
           res.setHeader("Retry-After", String(quota.retryAfterSeconds));
-          sendJson(res, 429, {
+          fail(429, {
             error: "rate limit exceeded",
             retryAfterSeconds: quota.retryAfterSeconds,
           });
-          log({ event: "rate_limited", keyId: auth.keyId });
+          log.warn("rate limited", { keyId: auth.keyId, route });
+          metrics.increment("oreochain_rate_limited_total", {});
           return;
         }
 
@@ -398,8 +571,13 @@ export function createHandler(config, backend, deps = {}) {
             // retries — which the browser adapter does, with backoff — sees a
             // brief slowdown instead of a dead gateway.
             res.setHeader("Retry-After", "1");
-            sendJson(res, 503, { error: "too many uploads in flight" }, { close: true });
-            log({ event: "shed", keyId: auth.keyId, inFlight: inFlightUploads });
+            fail(503, { error: "too many uploads in flight" }, { close: true });
+            log.warn("upload shed, every slot busy", {
+              keyId: auth.keyId,
+              inFlight: inFlightUploads,
+              slots: maxConcurrentUploads,
+            });
+            metrics.increment("oreochain_uploads_shed_total", {});
             return;
           }
 
@@ -410,14 +588,14 @@ export function createHandler(config, backend, deps = {}) {
               timeoutMs: config.readTimeoutMs,
             });
             if (body.length === 0) {
-              sendJson(res, 400, { error: "empty body" });
+              fail(400, { error: "empty body" });
               return;
             }
 
             const cid = await backend.put(body, chunkName(req));
             sendJson(res, 200, { cid });
-            log({
-              event: "pin",
+            metrics.increment("oreochain_bytes_pinned_total", {}, body.length);
+            log.info("pinned", {
               keyId: auth.keyId,
               bytes: body.length,
               cid,
@@ -438,11 +616,11 @@ export function createHandler(config, backend, deps = {}) {
             throw Object.assign(error, { status: error.status || 400 });
           }
           sendJson(res, 200, result);
-          log({
-            event: "receipt",
+          log.info("document recorded", {
             keyId: auth.keyId,
             fileHash: document.fileHash,
             pending: result.pending,
+            ms: Date.now() - started,
           });
           return;
         }
@@ -459,7 +637,7 @@ export function createHandler(config, backend, deps = {}) {
             return;
           }
           sendJson(res, 200, { batch });
-          log({ event: "batch_built", keyId: auth.keyId, root: batch.root, size: batch.size });
+          log.info("batch built", { keyId: auth.keyId, root: batch.root, size: batch.size });
           return;
         }
 
@@ -472,31 +650,38 @@ export function createHandler(config, backend, deps = {}) {
             "Cache-Control": "public, max-age=31536000, immutable",
           });
           res.end(Buffer.from(bytes));
-          log({ event: "fetch", keyId: auth.keyId, cid: match[1], bytes: bytes.length });
+          log.info("chunk served", {
+            keyId: auth.keyId,
+            cid: match[1],
+            bytes: bytes.length,
+            ms: Date.now() - started,
+          });
           return;
         }
 
-        sendJson(res, 404, { error: "no such endpoint" });
+        fail(404, { error: "no such endpoint" });
         return;
       }
 
       if (staticRoot && req.method === "GET" && (await serveStatic(req, res, staticRoot))) return;
 
-      sendJson(res, 404, { error: "not found" });
+      fail(404, { error: "not found" });
     } catch (error) {
       const status = Number.isInteger(error.status) ? error.status : 500;
       // Internal details go to the log, never to the client — an error message
       // is a fine place to leak a credential or an internal hostname.
-      log({
-        event: "error",
+      // A 500 is ours and needs the stack; a 4xx is the client's and would
+      // only fill the log with other people's mistakes at error level.
+      const report = status >= 500 ? log.error : log.warn;
+      report.call(log, "request failed", {
         status,
-        path: url.pathname,
+        route,
         message: error.message,
         upstreamStatus: error.upstreamStatus,
+        stack: status >= 500 ? error.stack : undefined,
       });
       if (!res.headersSent) {
-        sendJson(
-          res,
+        fail(
           status,
           { error: status === 500 ? "internal error" : error.message },
           { close: Boolean(error.stopReading) }
@@ -513,6 +698,8 @@ export const _internals = {
   chunkName,
   serveStatic,
   isServablePath,
+  requestId,
+  routeLabel,
   STATIC_DIRECTORIES,
   CID_ROUTE,
 };
