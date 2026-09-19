@@ -18,7 +18,8 @@
     "dev": "OREOCHAIN_STORAGE=memory OREOCHAIN_SERVE_STATIC=true OREOCHAIN_ALLOW_ANONYMOUS=true node server/index.mjs",
     "test": "node --test test/*.test.js",
     "abi": "node scripts/generate-abi.mjs",
-    "kdf-docs": "node scripts/sync-kdf-docs.mjs"
+    "kdf-docs": "node scripts/sync-kdf-docs.mjs",
+    "test-count": "node scripts/sync-test-count.mjs"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",

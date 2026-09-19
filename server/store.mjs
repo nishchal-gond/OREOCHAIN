@@ -49,6 +49,7 @@ import {
   openSync,
   readFileSync,
   existsSync,
+  renameSync,
   rmSync,
   truncateSync,
   writeSync,
@@ -86,6 +87,18 @@ export class StoreLockedError extends StoreError {
 }
 
 /**
+ * How often a live holder rewrites its heartbeat, and how long a lock may go
+ * unrefreshed before it is considered abandoned.
+ *
+ * The gap between them is five missed renewals. Shorter would risk declaring a
+ * briefly stalled process dead — a long GC pause or a slow disk — and two
+ * writers is the outcome this whole mechanism exists to avoid. Longer would
+ * make a crashed container wait longer to reclaim its own store.
+ */
+const HEARTBEAT_MS = 2000;
+const LEASE_MS = 10000;
+
+/**
  * Take exclusive ownership of a store file, or refuse to start.
  *
  * WHY THIS EXISTS
@@ -108,10 +121,15 @@ export class StoreLockedError extends StoreError {
  *   no takeover, because there is no safe way to tell "it crashed" from "it is
  *   busy" across machines, and guessing wrong is the corruption this exists to
  *   prevent.
- * - The same host and *our own* pid is our own stale lock: one process cannot
- *   run twice under one pid. This is the common case in a container, where a
- *   restarted process is pid 1 in a pod of the same name, and treating it as a
- *   conflict would refuse to start after every crash.
+ * - The same host and *our own* pid looks like our own stale lock, and a
+ *   restarted container is exactly that: pid 1 again in a pod of the same
+ *   name. But two live containers can also both be pid 1 with one hostname —
+ *   `docker run --hostname shared` twice against one volume, or hostNetwork
+ *   pods sharing an RWX volume — and from inside a PID namespace /proc/1 is
+ *   *yourself*, so the neighbour is not observable at all. A dead predecessor
+ *   and a live neighbour leave byte-identical lock files, and no function of
+ *   identical inputs can separate them. What does separate them is a holder
+ *   that keeps changing the file: see the lease below.
  * - The same host and a different pid that is still alive is another process
  *   here — someone started it twice. Refuse.
  * - The same host and a dead pid is a crash. Take it over.
@@ -125,7 +143,7 @@ const heldInThisProcess = new Set();
 
 function acquireLock(filePath, { host = hostname(), pid = process.pid, now = Date.now } = {}) {
   const lockPath = `${filePath}.lock`;
-  const holder = { host, pid, since: new Date(now()).toISOString() };
+  const holder = { host, pid, since: new Date(now()).toISOString(), heartbeat: now() };
 
   /*
    * "Our own pid" is treated as a stale lock below, which is what makes a
@@ -142,13 +160,42 @@ function acquireLock(filePath, { host = hostname(), pid = process.pid, now = Dat
   }
 
   function write() {
-    // wx: create, or fail if it exists. The atomicity of that is the lock.
+    // wx: create, or fail if it exists. The atomicity of that is the lock, and
+    // it holds across containers because it is a property of the inode.
     const fd = openSync(lockPath, "wx");
     try {
       writeSync(fd, JSON.stringify(holder) + "\n");
       fsyncSync(fd);
     } finally {
       closeSync(fd);
+    }
+  }
+
+  /**
+   * Refresh the heartbeat in place.
+   *
+   * This is the only thing that distinguishes a live holder from a dead one
+   * when identity cannot: a lock whose timestamp keeps moving is held. Written
+   * whole and not fsynced — losing one beat costs nothing, and five in a row
+   * is what marks the lock abandoned.
+   */
+  function beat() {
+    try {
+      // Written to a sibling and renamed: rename is atomic within a
+      // filesystem, so a concurrent reader sees either the old record or the
+      // new one, never a half-written line it would have to treat as
+      // corruption.
+      const staging = `${lockPath}.${pid}.tmp`;
+      const fd = openSync(staging, "w");
+      try {
+        writeSync(fd, JSON.stringify({ ...holder, heartbeat: now() }) + "\n");
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(staging, lockPath);
+    } catch {
+      // A failed beat is not worth crashing the service over; the next one may
+      // succeed, and if they all fail the lock ages out, which is safe.
     }
   }
 
@@ -188,16 +235,61 @@ function acquireLock(filePath, { host = hostname(), pid = process.pid, now = Dat
       );
     }
 
-    // Our own pid, or a dead one: a crash left this behind. Take it over.
+    /*
+     * Same host, same pid. Our own crashed predecessor looks exactly like a
+     * live neighbour in another PID namespace that happens to share our
+     * hostname and our pid — /proc/1 is ourselves, so isRunning() answers
+     * about us and tells us nothing about them.
+     *
+     * The heartbeat is what separates the two. A holder that is running keeps
+     * rewriting it; one that died stopped. So take over only once the lease
+     * has plainly lapsed.
+     */
+    if (existing.pid === pid) {
+      if (existing.heartbeat === undefined) {
+        /*
+         * A lock written before heartbeats existed. It carries no evidence
+         * either way, and this is the one branch where guessing wrong means
+         * two writers, so it is not guessed. Only reachable once, upgrading
+         * across a crash.
+         */
+        throw new StoreLockedError(
+          `${filePath} has a lock from an older version with no heartbeat, so whether its ` +
+            "holder is still running cannot be determined. Confirm nothing else is using " +
+            `this store, then delete ${lockPath} and start again.`,
+          existing
+        );
+      }
+
+      const age = now() - (Number(existing.heartbeat) || 0);
+      if (age < LEASE_MS) {
+        throw new StoreLockedError(
+          `${filePath} is held by a live process on "${existing.host}" sharing our pid ` +
+            `${pid} — its lock was refreshed ${Math.round(age / 1000)}s ago. Two containers ` +
+            "with one hostname on a shared volume look identical from inside, so this is " +
+            `refused rather than guessed. If that process is gone, retry in ` +
+            `${Math.ceil((LEASE_MS - age) / 1000)}s.`,
+          existing
+        );
+      }
+    }
+
+    // A dead pid, or a lease nobody has refreshed. Take it over.
     rmSync(lockPath, { force: true });
     write();
   }
 
   heldInThisProcess.add(lockPath);
 
+  // unref'd: holding the store must not by itself keep the process alive.
+  const timer = setInterval(beat, HEARTBEAT_MS);
+  if (typeof timer.unref === "function") timer.unref();
+
   return {
     path: lockPath,
+    beat,
     release() {
+      clearInterval(timer);
       heldInThisProcess.delete(lockPath);
       rmSync(lockPath, { force: true });
     },
@@ -492,6 +584,11 @@ export function openStore({
       let pending = 0;
       for (const document of documents.values()) if (document.batchRoot === null) pending++;
       return { documents: documents.size, batches: batches.size, pending };
+    },
+
+    /** Refresh the lock's heartbeat now; the interval does this on its own. */
+    beat() {
+      if (held !== null) held.beat();
     },
 
     close() {
