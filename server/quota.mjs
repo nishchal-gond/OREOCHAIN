@@ -29,6 +29,10 @@ export const DAILY_BYTES = "daily-bytes";
 export const DAILY_OBJECTS = "daily-objects";
 
 /**
+ * The `code` on a refusal is the stable token a client switches on; `scope`
+ * says which of the two limits inside that code was hit, for an operator
+ * reading logs. See REFUSAL_CODES in server/gateway.mjs.
+ *
  * @param {object} options all limits are "no limit" when null
  * @param {number|null} options.clientBytes bytes one client may pin per window
  * @param {number|null} options.clientObjects objects one client may pin per window
@@ -98,6 +102,7 @@ export function createQuota(options = {}) {
         return {
           allowed: false,
           scope: DAILY_OBJECTS,
+          code: "gateway_budget",
           status: 503,
           retryAfterSeconds: secondsUntil((current.index + 1) * DAY_MS),
           message: "this gateway has pinned as much as it is allowed to today",
@@ -108,6 +113,7 @@ export function createQuota(options = {}) {
         return {
           allowed: false,
           scope: DAILY_BYTES,
+          code: "gateway_budget",
           status: 503,
           retryAfterSeconds: secondsUntil((current.index + 1) * DAY_MS),
           message: "this gateway has pinned as much as it is allowed to today",
@@ -121,6 +127,7 @@ export function createQuota(options = {}) {
         return {
           allowed: false,
           scope: CLIENT_OBJECTS,
+          code: "client_quota",
           status: 429,
           retryAfterSeconds: secondsUntil(client.start + windowMs),
           message: "you have pinned as many objects as one client may in this window",
@@ -131,6 +138,7 @@ export function createQuota(options = {}) {
         return {
           allowed: false,
           scope: CLIENT_BYTES,
+          code: "client_quota",
           status: 429,
           retryAfterSeconds: secondsUntil(client.start + windowMs),
           message: "you have pinned as many bytes as one client may in this window",
