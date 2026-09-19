@@ -24,7 +24,14 @@ import { createAdapterFromConfig, putAll } from "./storage/ipfs.js";
 import { CHUNKED_VERIFICATION_ABI } from "./contract-abi.js";
 
 const DEFAULTS = {
-  contract: { address: null, chainId: null, explorer: "https://polygonscan.com" },
+  contract: {
+    address: null,
+    chainId: null,
+    explorer: "https://polygonscan.com",
+    // Read-only JSON-RPC, so retrieval and verification work without a wallet.
+    // See js/App.js, which builds the provider.
+    rpcUrl: null,
+  },
   storage: { provider: "gateway" },
   crypto: {
     suite: DEFAULT_SUITE,
@@ -106,7 +113,12 @@ function humanSize(bytes) {
 
 function contractInstance() {
   const { contract } = config();
-  if (!globalThis.web3) throw new Error("web3 is not loaded — is MetaMask installed?");
+  if (!globalThis.web3) {
+    throw new Error(
+      "No chain connection. Install a browser wallet, or set contract.rpcUrl in " +
+        "js/config.js to a read-only RPC endpoint — reading a record needs no wallet."
+    );
+  }
   if (!contract.address || /^0x0+$/.test(contract.address)) {
     throw new Error(
       "No contract address configured. Copy js/config.example.js to js/config.js and set contract.address."

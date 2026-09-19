@@ -82,8 +82,8 @@ async function waitForNote(page, pattern) {
   return page.locator("#note").innerText();
 }
 
-async function open(url) {
-  const { page, problems } = await app.newPage();
+async function open(url, options = {}) {
+  const { page, problems } = await app.newPage(options);
   await page.goto(`${app.gateway.origin}${url}`, { waitUntil: "load" });
   return { page, problems };
 }
@@ -240,4 +240,86 @@ test("verifying a registered file needs no passphrase", { skip: missing }, async
   const note = await waitForNote(page, /matches a document registered on-chain/);
   assert.match(note, /matches a document registered on-chain/);
   assert.deepEqual(problems, []);
+});
+
+test("a visitor with no wallet can verify a document", { skip: missing }, async () => {
+  // The case the product is for: someone was sent a file and wants to know
+  // whether it is the one that was registered. They have no wallet, no
+  // account and no intention of installing one. Until contract.rpcUrl
+  // existed the app had no provider at all without MetaMask, so this page
+  // told them to go and install it.
+  const { file } = await sampleFile("sent-to-me.pdf", 30_000);
+
+  const uploader = await open("/upload.html");
+  await upload({ page: uploader.page, file });
+
+  const { page, problems } = await open("/verify.html", { wallet: false });
+  assert.equal(
+    await page.evaluate(() => Boolean(window.ethereum)),
+    false,
+    "this context is meant to have no wallet in it"
+  );
+  assert.equal(
+    await page.evaluate(() => Boolean(window.web3)),
+    true,
+    "the page should still have built a read-only provider from contract.rpcUrl"
+  );
+  assert.equal(
+    await page.locator(".alert").isVisible(),
+    false,
+    "a read-only page has no reason to demand a wallet"
+  );
+
+  await page.setInputFiles("#doc-file", file);
+  await page.waitForFunction(
+    () => /^0x[0-9a-f]{64}$/.test(document.getElementById("lookup-hash").value),
+    { timeout: 60_000 }
+  );
+  await page.click("#chunked-verify-button");
+
+  assert.match(
+    await waitForNote(page, /matches a document registered on-chain/),
+    /matches a document registered on-chain/
+  );
+  assert.deepEqual(problems, []);
+});
+
+test("a visitor with no wallet can retrieve and verify a document", { skip: missing }, async () => {
+  const { file, bytes } = await sampleFile("shared-report.pdf", 50_000);
+
+  const uploader = await open("/upload.html");
+  const result = await upload({ page: uploader.page, file });
+
+  const share = new URL(result.shareUrl);
+  const { page, problems } = await open(share.pathname + share.search, { wallet: false });
+
+  await page.fill("#retrieve-passphrase", PASSPHRASE);
+  await page.click("#chunked-retrieve-button");
+  assert.match(await waitForNote(page, /Verified/), /Verified/);
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.locator("#download-document").click(),
+  ]);
+  const saved = path.join(workspace, "no-wallet-restored.bin");
+  await download.saveAs(saved);
+  assert.ok(fs.readFileSync(saved).equals(bytes));
+  assert.deepEqual(problems, []);
+});
+
+test("a page that signs asks for a wallet; a page that reads does not", { skip: missing }, async () => {
+  const wallets = await open("/upload.html", { wallet: false });
+  assert.equal(
+    await wallets.page.locator(".alert").isVisible(),
+    true,
+    "upload.html signs a transaction, so it should say a wallet is needed"
+  );
+  assert.match(await wallets.page.locator(".alert").innerText(), /wallet/i);
+
+  const reader = await open("/retrieve.html", { wallet: false });
+  assert.equal(
+    await reader.page.locator(".alert").isVisible(),
+    false,
+    "retrieve.html only reads, so it should not"
+  );
 });
