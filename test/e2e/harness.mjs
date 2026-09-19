@@ -127,75 +127,142 @@ export async function openApp(options = {}) {
   const browser = await playwright.chromium.launch({
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
-  const context = await browser.newContext({ acceptDownloads: true });
 
-  // The page's only route to the chain. Playwright marshals through JSON, so
-  // the provider on the other side hands back a string.
-  await context.exposeFunction("__oreochainRpc", async (payload) => {
-    const { method, params } = JSON.parse(payload);
-    try {
-      return JSON.stringify({ result: await chain.request({ method, params }) });
-    } catch (error) {
-      return JSON.stringify({ error: { message: error.message, code: error.code || -32603 } });
-    }
-  });
+  /**
+   * Where a page with no wallet reaches the chain.
+   *
+   * It has to be https and it cannot be a local port: the gateway serves
+   * `connect-src 'self' https:`, so the browser refuses an http:// RPC
+   * outright. Rather than run a TLS server with a self-signed certificate —
+   * and a private key that the no-secrets CI job would rightly object to — the
+   * URL is intercepted and answered from the same in-process chain.
+   */
+  const RPC_URL = "https://rpc.oreochain.test/";
 
-  await context.addInitScript(
-    ({ config, account }) => {
-      window.OREOCHAIN_CONFIG = config;
-
-      /** The EIP-1193 surface web3.js and js/App.js actually use. */
-      window.ethereum = {
-        isMetaMask: true,
-        selectedAddress: account,
-        async request({ method, params }) {
-          const raw = await window.__oreochainRpc(JSON.stringify({ method, params: params || [] }));
-          const response = JSON.parse(raw);
-          if (response.error) {
-            const error = new Error(response.error.message);
-            error.code = response.error.code;
-            throw error;
-          }
-          return response.result;
-        },
-        on() {},
-        removeListener() {},
-      };
-
-      // js/App.js reads the connected account from localStorage and renders
-      // the signed-in view only when it is there. MetaMask's approval popup
-      // has no headless equivalent, so the session starts already connected.
-      try {
-        window.localStorage.setItem("userAddress", account);
-      } catch {
-        /* the first navigation may be about:blank */
-      }
-    },
-    {
-      account: chain.accounts[0],
-      config: {
-        contract: {
-          address: chain.address,
-          chainId: chain.chainId,
-          explorer: "https://example.invalid",
-        },
-        storage: {
-          // "pinata" in backend mode means "POST to my own server", which is
-          // exactly what the gateway is. The browser sees no credential.
-          provider: "pinata",
-          mode: "backend",
-          endpoint: "/api/storage/pin",
-          gateways: ["/api/storage/"],
-          retry: { maxAttempts: 2, backoffBaseMs: 50 },
-        },
-        crypto: {
-          suite: options.suite || "aes-256-gcm",
-          chunkSize: options.chunkSize || 65536,
-          kdf: options.kdf || TEST_KDF,
-        },
+  function pageConfig({ rpcUrl = null } = {}) {
+    return {
+      contract: {
+        address: chain.address,
+        chainId: chain.chainId,
+        explorer: "https://example.invalid",
+        rpcUrl,
       },
+      storage: {
+        // "pinata" in backend mode means "POST to my own server", which is
+        // exactly what the gateway is. The browser sees no credential.
+        provider: "pinata",
+        mode: "backend",
+        endpoint: "/api/storage/pin",
+        gateways: ["/api/storage/"],
+        retry: { maxAttempts: 2, backoffBaseMs: 50 },
+      },
+      crypto: {
+        suite: options.suite || "aes-256-gcm",
+        chunkSize: options.chunkSize || 65536,
+        kdf: options.kdf || TEST_KDF,
+      },
+    };
+  }
+
+  /**
+   * A browser context, with or without a wallet in it.
+   *
+   * These are separate contexts rather than separate pages because both the
+   * injected provider and the config are set by an init script, which is a
+   * property of the context.
+   */
+  async function newContext({ wallet = true } = {}) {
+    const context = await browser.newContext({ acceptDownloads: true });
+
+    if (wallet) {
+      // Playwright marshals through JSON, so the provider hands back a string.
+      await context.exposeFunction("__oreochainRpc", async (payload) => {
+        const { method, params } = JSON.parse(payload);
+        try {
+          return JSON.stringify({ result: await chain.request({ method, params }) });
+        } catch (error) {
+          return JSON.stringify({ error: { message: error.message, code: error.code || -32603 } });
+        }
+      });
+
+      await context.addInitScript(
+        ({ config, account }) => {
+          window.OREOCHAIN_CONFIG = config;
+
+          /** The EIP-1193 surface web3.js and js/App.js actually use. */
+          window.ethereum = {
+            isMetaMask: true,
+            selectedAddress: account,
+            async request({ method, params }) {
+              const raw = await window.__oreochainRpc(
+                JSON.stringify({ method, params: params || [] })
+              );
+              const response = JSON.parse(raw);
+              if (response.error) {
+                const error = new Error(response.error.message);
+                error.code = response.error.code;
+                throw error;
+              }
+              return response.result;
+            },
+            on() {},
+            removeListener() {},
+          };
+
+          // js/App.js reads the connected account from localStorage and
+          // renders the signed-in view only when it is there. MetaMask's
+          // approval popup has no headless equivalent, so the session starts
+          // already connected.
+          try {
+            window.localStorage.setItem("userAddress", account);
+          } catch {
+            /* the first navigation may be about:blank */
+          }
+        },
+        { account: chain.accounts[0], config: pageConfig() }
+      );
+
+      return context;
     }
-  );
+
+    // No wallet at all: no window.ethereum, only a read-only RPC endpoint.
+    await context.route(RPC_URL, async (route) => {
+      const body = JSON.parse(route.request().postData() || "{}");
+      const calls = Array.isArray(body) ? body : [body];
+
+      const answers = await Promise.all(
+        calls.map(async (call) => {
+          try {
+            return {
+              jsonrpc: "2.0",
+              id: call.id,
+              result: await chain.request({ method: call.method, params: call.params || [] }),
+            };
+          } catch (error) {
+            return {
+              jsonrpc: "2.0",
+              id: call.id,
+              error: { code: error.code || -32603, message: error.message },
+            };
+          }
+        })
+      );
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(Array.isArray(body) ? answers : answers[0]),
+      });
+    });
+
+    await context.addInitScript((config) => {
+      window.OREOCHAIN_CONFIG = config;
+    }, pageConfig({ rpcUrl: RPC_URL }));
+
+    return context;
+  }
+
+  const context = await newContext({ wallet: true });
 
   /**
    * js/config.js is a deployment's own gitignored settings file, so a checkout
@@ -206,8 +273,9 @@ export async function openApp(options = {}) {
     return !url.startsWith(gateway.origin) || url.endsWith("/js/config.js");
   }
 
-  async function newPage() {
-    const page = await context.newPage();
+  async function newPage({ wallet = true } = {}) {
+    const surface = wallet ? context : await newContext({ wallet: false });
+    const page = await surface.newPage();
     const problems = [];
 
     page.on("console", (message) => {
