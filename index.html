@@ -90,7 +90,9 @@
           <a href="verify.html" class="btn ghost-button">Verify one</a>
         </div>
         <p class="hero-note">
-          No wallet. No gas fees. No plaintext ever leaves your device.
+          No plaintext ever leaves your device. Uploading registers from your
+          own wallet today &mdash; wallet-free batched anchoring is being
+          connected now.
         </p>
       </div>
       <!-- end of container -->
@@ -113,12 +115,17 @@
           </div>
           <div class="col-lg-4 text-center p-5" data-aos="zoom-in">
             <img src="files/undraw_investment_data_re_sh9x.svg" width="150" alt="" />
-            <h4 class="py-3">No wallet, no gas</h4>
+            <h4 class="py-3">
+              No wallet, no gas
+              <small class="text-warning d-block">being connected</small>
+            </h4>
             <p class="para-light">
-              You get a signed receipt the moment your file is stored. Thousands
-              of documents are then anchored together in
+              A signed receipt the moment your file is stored, with thousands of
+              documents then anchored together in
               <span class="text-warning">one transaction</span>, so per-document
-              cost falls as the platform grows.
+              cost falls as the platform grows. The gateway issues and batches
+              these now; until the app uses them, an upload here registers one
+              document from your own wallet.
             </p>
           </div>
           <div class="col-lg-4 text-center p-5" data-aos="zoom-in">
@@ -213,13 +220,13 @@
                     <p>ENCRYPTION KEYS PER CHUNK &mdash; NEVER REUSED</p>
                   </div>
                   <div class="col-6">
-                    <i class="fas fa-coins fa-2x"></i>
+                    <i class="fas fa-key fa-2x"></i>
                     <h2>0</h2>
-                    <p>WALLETS OR GAS FEES REQUIRED FROM USERS</p>
+                    <p>PASSPHRASES OR FILE KEYS THE SERVER EVER SEES</p>
                   </div>
                   <div class="col-6">
                     <i class="fas fa-vial fa-2x"></i>
-                    <h2>200</h2>
+                    <h2>434</h2>
                     <p>AUTOMATED TESTS, INCLUDING ADVERSARIAL ONES</p>
                   </div>
                 </div>
@@ -251,7 +258,7 @@
               to own. Neither scales to a platform.
             </p>
             <p class="para-light">
-              Instead, you receive a signed receipt the instant your file is
+              Instead, a signed receipt is issued the instant your file is
               stored. Documents are then collected and committed together
               through a single Merkle root, published in one transaction.
               Each document keeps its own independent inclusion proof, a few
@@ -261,6 +268,14 @@
               A batch of ten thousand costs what a batch of one costs. The
               price per document falls as the platform grows, rather than
               rising with it.
+            </p>
+            <p class="para-light">
+              <span class="text-warning">Where this stands today:</span> the
+              gateway issues receipts and builds batches, and this app does not
+              yet ask it to &mdash; uploading from here still registers one
+              document per transaction from your own wallet. Connecting the two
+              is in progress, and the wallet route stays afterwards for anyone
+              who wants no party between them and the chain.
             </p>
           </div>
           <div class="col-lg-5 text-center" data-aos="zoom-in">

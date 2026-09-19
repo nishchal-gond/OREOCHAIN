@@ -11,6 +11,19 @@ window.OREOCHAIN_CONFIG = {
     // Chain the contract is deployed on (137 = Polygon mainnet, 80002 = Amoy testnet).
     chainId: 137,
     explorer: "https://polygonscan.com",
+
+    // A read-only JSON-RPC endpoint for this chain.
+    //
+    // Set this. Without it the app can only reach the chain through a wallet,
+    // which means someone who was sent a document and wants to check it has to
+    // install MetaMask to read a public record — and a document anchored by the
+    // gateway, with no wallet anywhere in the story, cannot be verified at all.
+    //
+    // It is read-only and public: it signs nothing and holds no account. Any
+    // public endpoint for your chain will do, though a provider with a key in
+    // the URL should be a browser-restricted one, since this file is served to
+    // every visitor.
+    rpcUrl: "https://polygon-rpc.com",
   },
 
   storage: {
