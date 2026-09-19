@@ -23,7 +23,7 @@
       <div class="lds-roller"><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>
     </div>
     <div >
-      <i onclick="topFunction()" id="scroll-btn" class="fa-solid fa-angle-up"></i>
+      <i data-action="topFunction" id="scroll-btn" class="fa-solid fa-angle-up"></i>
     </div>
     <!-----------------------------navbBar Start-------------------->
   <!--NavBar Start-->
@@ -59,12 +59,12 @@
       <div class="d-flex">
         <button
           id="loginButton"
-          onclick="connect()"
+          data-action="connect"
           class="btn main-button"
         >Login</button>
         <button
           id="logoutButton"
-          onclick="disconnect()"
+          data-action="disconnect"
           class="btn main-button"
         > Logout</button>
       </div>
@@ -105,21 +105,21 @@
             <img id="loader" class="d-none" src="files/loader.svg" alt="loader">
             <div  class="btn-container mt-3">
               <input
-              onclick="addExporter()"
+              data-action="addExporter"
                 class="btn btn-primary  exporter-button main-button"
                 type="submit"
                 value="Add Exporter"
                 id="ExporterBtn"
               />
               <input
-              onclick="deleteExporter()"
+              data-action="deleteExporter"
                 class="btn btn-danger  exporter-button main-button"
                 type="submit"
                 value="Delete Exporter"
                 id="delete"
               />
               <input
-              onclick="editExporter()"
+              data-action="editExporter"
                 class="btn btn-warning  exporter-button main-button"
                 type="submit"
                 value="Edit Exporter"
@@ -210,20 +210,10 @@
     </div>
     <script src="./js/aos.js"></script>
     <script src="./js/script.js"></script>
-    <script
-			  src="https://code.jquery.com/jquery-3.6.0.js"
-			  integrity="sha256-H+K7U5CnXl1h5ywQfKtSj8PCmoN9aaq30gDh27Xc0jk="
-			  crossorigin="anonymous"></script>    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js"></script>
-    
-    <!--=====================Start Code===========================-->
-    <script defer>
-  document.getElementById("Exporter-address").onclick= ()=>{
-  $("#note").html(``);
-  $("#ExporterBtn").attr("disabled", false);
-  $("#edit").attr("disabled", false);
-  $("#delete").attr("disabled", false);
-}
- 
-    </script>
+    <script src="./js/ui.js"></script>
+    <script src="./js/bootstrap.min.js"></script>
+
+    <!-- Clearing the note when the address changes lives in js/ui.js: an
+         inline script cannot run under the gateway's Content-Security-Policy. -->
   </body>
 </html>
