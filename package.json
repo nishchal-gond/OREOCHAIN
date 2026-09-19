@@ -18,6 +18,8 @@
     "dev": "OREOCHAIN_STORAGE=memory OREOCHAIN_SERVE_STATIC=true OREOCHAIN_ALLOW_ANONYMOUS=true node server/index.mjs",
     "test": "node --test test/*.test.js",
     "abi": "node scripts/generate-abi.mjs",
+    "deploy-contract": "node scripts/deploy-contract.mjs",
+    "add-exporter": "node scripts/add-exporter.mjs",
     "kdf-docs": "node scripts/sync-kdf-docs.mjs"
   },
   "dependencies": {

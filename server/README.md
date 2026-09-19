@@ -48,6 +48,12 @@ The process refuses to start if it is misconfigured — no API keys, no pinning
 credential, a wildcard CORS origin — rather than running in a state you did not
 intend.
 
+**A deployment is two processes.** This one issues receipts promising that a
+document will be anchored; [the anchoring worker](#the-anchoring-worker) is
+what makes that true. Running the gateway alone is fine for development and
+leaves every receipt an unkept promise in production. The gateway says so at
+startup when no anchoring key is configured.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -55,6 +61,7 @@ intend.
 | `PORT` | `8787` | Listen port |
 | `HOST` | `127.0.0.1` | Listen address. Keep it loopback behind a reverse proxy. |
 | `OREOCHAIN_API_KEYS` | — | Comma-separated client keys, each ≥32 characters |
+| `OREOCHAIN_ANCHOR_API_KEYS` | — | The subset of the above allowed to drive anchoring. Unset means nothing may anchor. |
 | `OREOCHAIN_ALLOW_ANONYMOUS` | `false` | Disable auth entirely. Only for a genuinely public gateway. |
 | `PINATA_JWT` | — | Pinning credential. Never leaves this process. |
 | `OREOCHAIN_STORAGE` | `pinata` | `memory` for local testing |
@@ -72,8 +79,12 @@ intend.
 | `OREOCHAIN_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
 | `OREOCHAIN_SHUTDOWN_DELAY_MS` | `0` | Keep serving this long after SIGTERM, so a load balancer notices `/ready` first |
 
-Any of `OREOCHAIN_API_KEYS`, `PINATA_JWT` and `OREOCHAIN_RECEIPT_KEY` can be
-given as `<NAME>_FILE` pointing at a file instead — the form Docker secrets,
+The anchoring worker is a second process with its own settings — see
+[The anchoring worker](#the-anchoring-worker).
+
+Any of `OREOCHAIN_API_KEYS`, `OREOCHAIN_ANCHOR_API_KEYS`, `PINATA_JWT` and
+`OREOCHAIN_RECEIPT_KEY` can be given as `<NAME>_FILE` pointing at a file
+instead — the form Docker secrets,
 Kubernetes secret mounts and systemd `LoadCredential` all use. A value in the
 environment is visible in `docker inspect`, in `/proc`, and to every child
 process; a file is not. Setting both a variable and its `_FILE` twin is an
@@ -360,9 +371,17 @@ the gateway, and the gateway must list it in its own
 without touching any client.
 
 Three things are true of the chain key beyond holding it: the address must be
-**funded**, it must be an **authorised exporter** on the contract
-(`addExporter(address, info)`, callable only by the contract owner), and it
-must be **nowhere near the gateway**. The worker is a separate process
+**funded**, it must be an **authorised exporter** on the contract, and it must
+be **nowhere near the gateway**. Authorising it is one command from a dev
+checkout, run with the contract owner's key:
+
+```bash
+OREOCHAIN_CHAIN_RPC=… OREOCHAIN_DEPLOY_KEY_FILE=… OREOCHAIN_CONTRACT_ADDRESS=… \
+npm run add-exporter -- 0x<the worker's address> "anchor worker" --confirm
+```
+
+Without `--confirm` it checks the owner, checks whether the address is already
+authorised, and sends nothing. The worker is a separate process
 precisely so a key that can spend is not in the process that parses public
 uploads.
 
