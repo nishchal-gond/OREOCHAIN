@@ -252,6 +252,7 @@ logged.
 | `POST /api/proofs/batch` | key | Build a batch, return the root to anchor |
 | `GET /api/proofs/key` | **public** | Receipt verification key |
 | `GET /api/proofs/inclusion/<hash>` | **public** | Inclusion proof for a document |
+| `GET /api/proofs/verify/<hash>` | **public** | Receipt, proof and the on-chain record, for checking without a wallet |
 
 Verification endpoints are deliberately public. A court, an employer or a
 regulator checking a certificate has no account here and should not need one.
@@ -284,7 +285,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              411 tests, including EVM cross-checks
+test/                              422 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -329,7 +330,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test           # 411 tests
+npm test           # 422 tests
 npm run abi        # regenerate js/contract-abi.js after changing the contract
 npm run kdf-docs   # rewrite the key-derivation numbers in the docs from js/core/kdf.js
 npm run test-count # rewrite the counts above from a real run of the suite
