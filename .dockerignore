@@ -20,11 +20,12 @@ secrets/
 *.pem
 *.key
 
-# Not needed at runtime.
+# Not needed at runtime. `files/` is NOT on this list: it holds the spinner
+# and every illustration the pages reference, so excluding it shipped an
+# image whose pages render with broken images throughout.
 test
 docs
 Contract
-files
 auto_update.txt
 Dockerfile
 docker-compose.yml

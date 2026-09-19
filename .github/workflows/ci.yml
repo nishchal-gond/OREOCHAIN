@@ -43,6 +43,34 @@ jobs:
       - name: Run tests
         run: npm test
 
+  browser:
+    name: The app works in a browser
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # Playwright is not a dependency of the package: it is a browser
+      # download, and the other jobs have no use for it.
+      - name: Install Playwright and Chromium
+        run: npm i --no-save playwright@1.56.1 && npx playwright install --with-deps chromium
+
+      # Drives the shipped pages in Chromium against a real gateway and the
+      # real compiled contract: choose a file, seal it, upload every chunk,
+      # register it on-chain, then fetch it back and compare the bytes.
+      # Everything this covers — module resolution in a browser, the
+      # Content-Security-Policy the gateway sends, the wallet round trip —
+      # is invisible to the unit suites and fatal to a user.
+      - name: Run the browser suite
+        run: npm run test:e2e
+
   verify-abi:
     name: Contract ABI is current
     runs-on: ubuntu-latest
@@ -67,6 +95,26 @@ jobs:
             git diff -- js/contract-abi.js
             exit 1
           fi
+
+  verify-test-count:
+    name: Readme test count is current
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # The Readme states the size of the suite in two places. It went stale
+      # three times running because the prose was written before the merge that
+      # added the tests, so the number is generated from a real run now.
+      - name: Check the counts against a real run
+        run: npm run test-count -- --check
 
   no-secrets:
     name: No credentials in source

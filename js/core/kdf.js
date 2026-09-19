@@ -27,7 +27,7 @@
  * still open. It is readable, never written for new files.
  */
 
-import { argon2id } from "../../node_modules/@noble/hashes/esm/argon2.js";
+import { argon2id } from "../vendor/noble/hashes/argon2.js";
 import { utf8, webcrypto } from "./bytes.js";
 
 export const KDF_ARGON2ID = "argon2id";

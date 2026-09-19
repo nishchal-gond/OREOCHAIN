@@ -204,7 +204,7 @@ nowhere to migrate *to*.
 ```bash
 git clone https://github.com/nishchal-gond/OREOCHAIN.git
 cd OREOCHAIN
-npm install
+npm install            # also what puts web3.min.js where the pages load it from
 
 # Everything in memory, no accounts, no chain — just to see it work
 npm run dev            # http://127.0.0.1:8787
@@ -317,7 +317,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              358 tests, including EVM cross-checks
+test/                              426 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -362,9 +362,12 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test          # 358 tests
-npm run abi       # regenerate js/contract-abi.js after changing the contract
-npm run kdf-docs  # rewrite the key-derivation numbers in the docs from js/core/kdf.js
+npm test           # 426 tests
+npm run test:e2e   # the pages driven in a real browser (needs Playwright)
+npm run abi        # regenerate js/contract-abi.js after changing the contract
+npm run vendor     # regenerate js/vendor/noble after changing a @noble version
+npm run kdf-docs   # rewrite the key-derivation numbers in the docs from js/core/kdf.js
+npm run test-count # rewrite the counts above from a real run of the suite
 ```
 
 Coverage includes the RFC 9106 known-answer vector for Argon2id, the derivation
@@ -383,6 +386,20 @@ Two test files matter more than the rest:
 - **`test/gateway.test.js`** runs against a real HTTP server on an ephemeral
   port, because body caps and traversal defences are properties of actual socket
   handling, not of a mocked object.
+- **`test/e2e/browser.test.js`** opens the shipped pages in Chromium, served by
+  a real gateway, and walks the path a user walks: choose a file, seal it,
+  upload every chunk, register it on the compiled contract, then fetch it back,
+  verify it against the anchored Merkle root and compare the downloaded bytes
+  with the original. It covers what only a browser can fail at — module
+  resolution, the Content-Security-Policy the gateway sends, the wallet round
+  trip — and every one of those had a live bug when it was written. It needs
+  Playwright, so it runs on its own (`npm run test:e2e`) and skips when
+  Playwright is absent:
+
+  ```bash
+  npm i --no-save playwright && npx playwright install chromium
+  npm run test:e2e
+  ```
 
 ---
 
