@@ -1,0 +1,31 @@
+# Keep the build context small and, more to the point, keep secrets and local
+# state out of an image that may be pushed to a registry.
+
+.git
+.github
+node_modules
+
+# Local configuration. js/config.js has held a live pinning token before; it is
+# gitignored, so without this line it would still reach the image.
+js/config.js
+.env
+.env.*
+!.env.example
+
+# The proof store, and any secret material generated locally.
+*.log
+oreochain-proofs.log
+data/
+secrets/
+*.pem
+*.key
+
+# Not needed at runtime.
+test
+docs
+Contract
+files
+auto_update.txt
+Dockerfile
+docker-compose.yml
+.dockerignore

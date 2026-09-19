@@ -95,3 +95,63 @@ jobs:
             exit 1
           fi
           echo "js/config.js is not tracked."
+
+  docker:
+    name: Image builds and serves
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Dockerfile is deployment documentation that can rot silently: a
+      # renamed directory or a dependency that needs a build toolchain breaks
+      # it, and nothing else in CI would notice.
+      - name: Build the image
+        run: docker build -t oreochain-gateway:ci .
+
+      # Building proves it compiles. This proves it runs — including the two
+      # things a Dockerfile most often gets wrong for a Node service: binding
+      # to loopback inside the container, so nothing outside can reach it, and
+      # running as PID 1 without signal handling, so SIGTERM is ignored and
+      # every deploy kills in-flight requests.
+      - name: Start it and check both probes
+        run: |
+          docker run -d --name gw -p 8787:8787 \
+            -e OREOCHAIN_STORAGE=memory \
+            -e OREOCHAIN_ALLOW_ANONYMOUS=true \
+            -e OREOCHAIN_DB_PATH=/data/proofs.log \
+            oreochain-gateway:ci
+
+          for i in $(seq 1 30); do
+            if curl -fsS localhost:8787/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+
+          echo "health:" && curl -fsS localhost:8787/health
+          echo "ready:"  && curl -fsS localhost:8787/ready
+
+          # A chunk round-trips, so the image contains everything the service
+          # actually needs rather than only enough to answer a health check.
+          cid=$(curl -fsS -X POST localhost:8787/api/storage/pin \
+                  --data-binary 'hello' | node -e \
+                  'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).cid))')
+          test -n "$cid"
+          test "$(curl -fsS localhost:8787/api/storage/$cid)" = "hello"
+          echo "round-tripped through $cid"
+
+      - name: SIGTERM is received and shutdown is graceful
+        run: |
+          docker stop -t 30 gw
+          # The drain only logs this line if the signal reached node rather
+          # than being swallowed by PID 1.
+          docker logs gw 2>&1 | grep -q '"msg":"shutting down"' \
+            || { echo "::error::SIGTERM never reached the gateway"; docker logs gw; exit 1; }
+          test "$(docker inspect -f '{{.State.ExitCode}}' gw)" = "0" \
+            || { echo "::error::container did not exit cleanly"; exit 1; }
+          echo "Shut down cleanly."
+
+      - name: The image runs as a non-root user
+        run: |
+          user=$(docker run --rm --entrypoint sh oreochain-gateway:ci -c 'id -un')
+          test "$user" != "root" || { echo "::error::image runs as root"; exit 1; }
+          echo "Runs as $user."

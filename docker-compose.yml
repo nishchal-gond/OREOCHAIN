@@ -1,0 +1,79 @@
+# A runnable deployment, and the reference for how the gateway expects to be
+# operated: secrets as files, the proof store on a volume that outlives the
+# container, and a healthcheck that asks the right question.
+#
+#   cp .env.example .env               # fill in OREOCHAIN_API_KEYS
+#   mkdir -p secrets
+#   echo -n "$PINATA_JWT" > secrets/pinata_jwt
+#   node scripts/generate-receipt-key.mjs > secrets/receipt_key
+#   docker compose up --build
+
+services:
+  gateway:
+    build: .
+    restart: unless-stopped
+
+    ports:
+      # Published on loopback. Put a reverse proxy in front for TLS rather than
+      # exposing this directly: the gateway speaks plain HTTP by design.
+      - "127.0.0.1:8787:8787"
+
+    env_file:
+      - .env
+
+    environment:
+      HOST: 0.0.0.0
+      OREOCHAIN_DB_PATH: /data/oreochain-proofs.log
+      # Read from the mounted files below instead of from the environment,
+      # where `docker inspect` would show them.
+      PINATA_JWT_FILE: /run/secrets/pinata_jwt
+      OREOCHAIN_RECEIPT_KEY_FILE: /run/secrets/receipt_key
+
+    secrets:
+      - pinata_jwt
+      - receipt_key
+
+    volumes:
+      # The proof store. Losing this leaves documents anchored on-chain with no
+      # recoverable inclusion proof, so it is a named volume, not a container
+      # layer, and it belongs in your backups.
+      - proofs:/data
+
+    healthcheck:
+      # Liveness. /ready is deliberately not used here: it answers 503 while
+      # the container is draining, and Compose would restart it for that.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    # Long enough for OREOCHAIN_SHUTDOWN_DELAY_MS plus the drain, so an upload
+    # in flight finishes instead of being killed at the 10-second default.
+    stop_grace_period: 30s
+
+    # Nothing here writes outside /data or needs a new privilege.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+secrets:
+  pinata_jwt:
+    file: ./secrets/pinata_jwt
+  receipt_key:
+    file: ./secrets/receipt_key
+
+volumes:
+  proofs:
