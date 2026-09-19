@@ -839,7 +839,7 @@ test("documents recorded while a batch is building stay queued for the next one"
 
   const next = await proofs.buildPendingBatch();
   assert.equal(next.size, 1);
-  assert.ok(proofs.proofFor(document(3).fileHash));
+  assert.ok(await proofs.proofFor(document(3).fileHash));
 });
 
 test("hex is normalised, so a document is receipted and anchored under one spelling", async () => {
@@ -855,8 +855,8 @@ test("hex is normalised, so a document is receipted and anchored under one spell
   assert.equal(receipt.statement.fileHash, upper.fileHash.toLowerCase());
 
   await proofs.buildPendingBatch();
-  assert.ok(proofs.proofFor(upper.fileHash), "an uppercase hash could not be looked up");
-  assert.ok(proofs.proofFor(upper.fileHash.toLowerCase()));
+  assert.ok(await proofs.proofFor(upper.fileHash), "an uppercase hash could not be looked up");
+  assert.ok(await proofs.proofFor(upper.fileHash.toLowerCase()));
 });
 
 test("an inclusion proof for an unknown document is a 404", async () => {

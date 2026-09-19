@@ -37,7 +37,14 @@
  */
 
 import { concat, fromHex, to0x, utf8 } from "./bytes.js";
-import { leafHash, merkleProof, merkleRoot, verifyMerkleProof } from "./chunker.js";
+import {
+  buildMerkleTree,
+  leafHash,
+  merkleProof,
+  merkleProofFromLevels,
+  merkleRoot,
+  verifyMerkleProof,
+} from "./chunker.js";
 
 export const ANCHOR_VERSION = "oreochain-anchor-v1";
 
@@ -153,6 +160,37 @@ export async function proveInBatch(batch, fileHash) {
     document: batch.documents[index],
     proof: proof.map((step) => ({ hash: to0x(step.hash), side: step.side })),
   };
+}
+
+/**
+ * Every document's inclusion proof, from one pass over the batch.
+ *
+ * proveInBatch() rebuilds the whole tree per call, so proving a batch of n
+ * documents one at a time costs n tree builds. Measured on a 500-document
+ * batch that was 9.5 seconds; at the default batch size of 1000 it was around
+ * 38. This builds the tree once and reads every path off it.
+ *
+ * @returns {Promise<Map<string, object>>} fileHash -> inclusion proof
+ */
+export async function proveWholeBatch(batch) {
+  const levels = await buildMerkleTree(batch.leaves);
+  const proofs = new Map();
+
+  batch.documents.forEach((document, index) => {
+    proofs.set(document.fileHash, {
+      version: ANCHOR_VERSION,
+      fileHash: document.fileHash,
+      batchRoot: batch.root,
+      index,
+      document,
+      proof: merkleProofFromLevels(levels, index).map((step) => ({
+        hash: to0x(step.hash),
+        side: step.side,
+      })),
+    });
+  });
+
+  return proofs;
 }
 
 /**

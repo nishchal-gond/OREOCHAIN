@@ -66,6 +66,7 @@ intend.
 | `OREOCHAIN_UPSTREAM_TIMEOUT_MS` | `60000` | Timeout for calls to the pinning service |
 | `OREOCHAIN_SERVE_STATIC` | `false` | Also serve the frontend, so there is no CORS at all |
 | `OREOCHAIN_RECEIPT_KEY` | — | Receipt signing key pair. Generate with `node scripts/generate-receipt-key.mjs`. |
+| `OREOCHAIN_DB_PATH` | `./oreochain-proofs.log` | Recorded documents and anchored batches. `:memory:` for tests only. |
 
 ## API
 
@@ -180,6 +181,14 @@ directory the frontend needs, add it to `STATIC_DIRECTORIES` in
    caller shares one bucket unless the proxy enforces its own limits.
 8. `SIGTERM` drains in-flight requests before exiting, so a deploy does not
    drop an upload mid-chunk.
+9. **Put `OREOCHAIN_DB_PATH` on persistent storage and back it up.** It holds
+   every recorded document and the ordered document list behind every anchored
+   batch. That order is the only thing that can prove a document belongs to a
+   root once the root is on-chain: lose the file and those documents stay
+   anchored forever with no recoverable inclusion proof. A document is written
+   and flushed to disk before its receipt is returned, so a receipt always has
+   a stored document behind it. The file is append-only JSON lines, so `wc -l`
+   counts records and `tail` shows the most recent.
 
 ## What is not here yet
 
@@ -187,10 +196,10 @@ Honest list, so nobody assumes otherwise:
 
 - **No per-user quota or billing.** Rate limiting bounds the *rate*, not the
   total. A client within its rate limit can still pin indefinitely.
-- **No persistence.** Rate-limit buckets, the pending anchor queue and the
-  memory backend all reset on restart. Losing the pending queue loses the
-  *anchor*, not the documents: chunks and manifests are already stored and
-  receipts are already issued and verifiable. Re-queue and anchor again.
+- **Rate-limit buckets and the memory backend still reset on restart.** Neither
+  matters: a bucket refills anyway, and the memory backend is for local
+  development. Recorded documents and anchored batches *are* persisted — see
+  `OREOCHAIN_DB_PATH` and the deployment note below.
 - **Anchor submission is manual.** The gateway builds the batch; something with
   a funded key has to send the transaction.
 - **No key rotation without a restart.** Keys are read once at startup.

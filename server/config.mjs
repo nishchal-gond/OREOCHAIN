@@ -101,6 +101,16 @@ export function loadConfig(env = process.env) {
 
       /** Serve the static frontend from the repository root. */
       serveStatic: env.OREOCHAIN_SERVE_STATIC === "true",
+
+      /**
+       * Where recorded documents and built batches are kept.
+       *
+       * Durable by default. An anchored batch's ordered document list is the
+       * only thing that can prove a document is in it, so holding it in memory
+       * means a restart leaves documents anchored on-chain and unprovable.
+       * ":memory:" opts back into that, for tests.
+       */
+      dbPath: env.OREOCHAIN_DB_PATH || "./oreochain-proofs.log",
     };
   } finally {
     process.env = previous;
@@ -118,6 +128,13 @@ export function assertSafeConfig(config) {
     console.warn(
       "[oreochain] WARNING: anonymous access is enabled and uploads are billed to your " +
         "Pinata account. Anyone who can reach this port can spend your quota."
+    );
+  }
+  if (config.dbPath === ":memory:") {
+    console.warn(
+      "[oreochain] WARNING: OREOCHAIN_DB_PATH is \":memory:\", so recorded documents and " +
+        "anchored batches are lost on restart. A document anchored on-chain then has no " +
+        "recoverable inclusion proof. Point it at a file on persistent storage."
     );
   }
   if (config.host === "0.0.0.0" && config.allowAnonymous) {

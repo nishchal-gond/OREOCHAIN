@@ -335,7 +335,7 @@ export function createHandler(config, backend, deps = {}) {
 
         const inclusion = INCLUSION_ROUTE.exec(url.pathname);
         if (inclusion) {
-          const proof = proofs.proofFor(inclusion[1]);
+          const proof = await proofs.proofFor(inclusion[1]);
           if (!proof) {
             sendJson(res, 404, { error: "no inclusion proof for that document yet" });
             return;

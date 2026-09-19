@@ -100,9 +100,21 @@ export async function hashChunks(chunks) {
  * what lets the verifier recompute the parent in the correct order.
  */
 export async function merkleProof(leaves, index) {
+  return merkleProofFromLevels(await buildMerkleTree(leaves), index);
+}
+
+/**
+ * The same path, from a tree that has already been built.
+ *
+ * Proving every leaf of a tree is the common case — a batch anchor hands one
+ * proof to each document it covers — and calling merkleProof() in a loop
+ * rebuilds the whole tree once per leaf, which is quadratic. Build the levels
+ * once with buildMerkleTree() and walk them from here instead.
+ */
+export function merkleProofFromLevels(levels, index) {
+  const leaves = levels[0];
   if (index < 0 || index >= leaves.length) throw new Error("leaf index out of range");
 
-  const levels = await buildMerkleTree(leaves);
   const proof = [];
   let position = index;
 
