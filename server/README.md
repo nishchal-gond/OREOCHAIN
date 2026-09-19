@@ -68,16 +68,88 @@ intend.
 | `OREOCHAIN_SERVE_STATIC` | `false` | Also serve the frontend, so there is no CORS at all |
 | `OREOCHAIN_RECEIPT_KEY` | — | Receipt signing key pair. Generate with `node scripts/generate-receipt-key.mjs`. |
 | `OREOCHAIN_DB_PATH` | `./oreochain-proofs.log` | Recorded documents and anchored batches. `:memory:` for tests only. |
+| `OREOCHAIN_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
+| `OREOCHAIN_SHUTDOWN_DELAY_MS` | `0` | Keep serving this long after SIGTERM, so a load balancer notices `/ready` first |
+
+Any of `OREOCHAIN_API_KEYS`, `PINATA_JWT` and `OREOCHAIN_RECEIPT_KEY` can be
+given as `<NAME>_FILE` pointing at a file instead — the form Docker secrets,
+Kubernetes secret mounts and systemd `LoadCredential` all use. A value in the
+environment is visible in `docker inspect`, in `/proc`, and to every child
+process; a file is not. Setting both a variable and its `_FILE` twin is an
+error rather than a guess about which one you meant, and a trailing newline is
+stripped so a credential written with `echo` still works.
+
+## Logs
+
+One JSON object per line on stdout, with a timestamp, a level, and — for
+anything inside a request — the request id:
+
+```json
+{"time":"2026-09-19T08:10:19.191Z","level":"info","msg":"pinned","reqId":"9e1c…","keyId":"a3f0c1d2e4b5","bytes":262144,"cid":"bafy…","ms":412}
+```
+
+The id comes back to the client in the `X-Request-Id` header and in the body of
+any error, so a user reporting a failure can quote something that finds the
+exact line. An incoming `X-Request-Id` is reused when it is short and
+alphanumeric, so a trace started at your edge proxy carries through.
+
+Field names that name a credential are never printed, and a value shaped like a
+JWT or an `Authorization` header is truncated even under a field nobody thought
+to list. That is a backstop, not a licence.
 
 ## API
 
 ### `GET /health`
 
-Unauthenticated liveness check.
+Unauthenticated liveness check: is the process running? Nothing more. Point a
+liveness probe here — a liveness probe that checks a dependency restarts the
+container every time the dependency is down, turning an outage into a crash
+loop.
 
 ```json
-{ "status": "ok", "storage": "pinata", "uptime": 1234.5 }
+{ "status": "ok", "storage": "pinata", "uptime": 1234.5, "inFlightUploads": 3 }
 ```
+
+### `GET /ready`
+
+Unauthenticated readiness check: should this instance be sent traffic? A
+different question, and the one a load balancer should ask.
+
+```json
+{ "status": "ready", "draining": false, "store": "ok" }
+```
+
+`503` when the process is shutting down, or when the proof store cannot answer
+— it must be writable before a receipt can honestly be issued.
+
+It deliberately does not probe Pinata. An upstream wobble would fail readiness
+on every replica at once and take the whole service out over a dependency that
+only affects one endpoint.
+
+On SIGTERM the gateway fails readiness *first*, keeps serving for
+`OREOCHAIN_SHUTDOWN_DELAY_MS`, and only then stops listening and drains
+in-flight requests. Set that to a little more than your readiness probe
+interval, or the probe never observes the 503 and requests arrive at a socket
+that has already closed.
+
+### `GET /metrics`
+
+Prometheus exposition format, behind the same bearer token as the API — request
+volume and queue depth are operational shape, not public information.
+
+```
+oreochain_requests_total{route="pin",status="2xx"} 14203
+oreochain_uploads_shed_total 4
+oreochain_documents_pending 17
+oreochain_uploads_in_flight 3
+```
+
+`oreochain_documents_pending` is the one to alert on: it grows silently when
+documents are being receipted and nothing is anchoring them, and nothing else
+in the system says so.
+
+Routes are labelled by shape (`pin`, `fetch`, `inclusion`), never by cid or file
+hash — one time series per document is how a metrics backend is destroyed.
 
 ### `POST /api/storage/pin`
 
@@ -203,6 +275,7 @@ Honest list, so nobody assumes otherwise:
   `OREOCHAIN_DB_PATH` and the deployment note below.
 - **Anchor submission is manual.** The gateway builds the batch; something with
   a funded key has to send the transaction.
-- **No key rotation without a restart.** Keys are read once at startup.
+- **No key rotation without a restart.** Keys are read once at startup, from
+  the environment or from a `_FILE` mount.
 - **No upload deduplication.** The same chunk pinned twice is pinned twice.
   (A document recorded twice is now deduplicated; chunks are not.)
