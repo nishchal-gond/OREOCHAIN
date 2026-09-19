@@ -49,9 +49,11 @@ import {
   openSync,
   readFileSync,
   existsSync,
+  rmSync,
   truncateSync,
   writeSync,
 } from "node:fs";
+import { hostname } from "node:os";
 import path from "node:path";
 
 /** Bumped only if a record's meaning changes; readers check it. */
@@ -66,6 +68,186 @@ export class StoreError extends Error {
     super(message);
     this.name = "StoreError";
   }
+}
+
+/**
+ * Raised when another process already holds this store.
+ *
+ * Its own class because the operator response is different from every other
+ * store error: nothing here is corrupt, and there is nothing to repair. Either
+ * a second replica was started, or a previous process is still running.
+ */
+export class StoreLockedError extends StoreError {
+  constructor(message, holder) {
+    super(message);
+    this.name = "StoreLockedError";
+    this.holder = holder;
+  }
+}
+
+/**
+ * Take exclusive ownership of a store file, or refuse to start.
+ *
+ * WHY THIS EXISTS
+ *
+ * This store is a single appended file with its index in memory. Two processes
+ * writing it interleave their appends and neither sees the other's records, so
+ * a batch written by one names documents the other cannot produce — an
+ * inclusion proof that cannot be rebuilt for a document already anchored on a
+ * public chain. That is silent: both processes keep answering, and the damage
+ * surfaces much later as a proof that will not verify.
+ *
+ * Scaling a Deployment to two replicas is a one-line change, so the failure
+ * has to be loud at startup rather than discovered in the data.
+ *
+ * HOW IT TELLS A REPLICA FROM A RESTART
+ *
+ * The lock records the host and pid that took it.
+ *
+ * - A different host is another replica. Refuse — always, with no timeout and
+ *   no takeover, because there is no safe way to tell "it crashed" from "it is
+ *   busy" across machines, and guessing wrong is the corruption this exists to
+ *   prevent.
+ * - The same host and *our own* pid is our own stale lock: one process cannot
+ *   run twice under one pid. This is the common case in a container, where a
+ *   restarted process is pid 1 in a pod of the same name, and treating it as a
+ *   conflict would refuse to start after every crash.
+ * - The same host and a different pid that is still alive is another process
+ *   here — someone started it twice. Refuse.
+ * - The same host and a dead pid is a crash. Take it over.
+ *
+ * KNOWN LIMIT: this is an advisory lock built on exclusive file creation,
+ * which NFS does not implement reliably. On NFS-backed storage it may not
+ * catch a second replica. The durable fix for running several instances is a
+ * store that supports concurrent writers, not a better lock.
+ */
+const heldInThisProcess = new Set();
+
+function acquireLock(filePath, { host = hostname(), pid = process.pid, now = Date.now } = {}) {
+  const lockPath = `${filePath}.lock`;
+  const holder = { host, pid, since: new Date(now()).toISOString() };
+
+  /*
+   * "Our own pid" is treated as a stale lock below, which is what makes a
+   * container restart work. That reasoning does not extend to a second store
+   * opened by the code that is already holding this one — same pid, both
+   * alive, both appending. Tracked here because no file check can tell the two
+   * apart.
+   */
+  if (heldInThisProcess.has(lockPath)) {
+    throw new StoreLockedError(
+      `${filePath} is already open in this process. Open one store per path.`,
+      { host, pid }
+    );
+  }
+
+  function write() {
+    // wx: create, or fail if it exists. The atomicity of that is the lock.
+    const fd = openSync(lockPath, "wx");
+    try {
+      writeSync(fd, JSON.stringify(holder) + "\n");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  try {
+    write();
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+
+    let existing;
+    try {
+      existing = JSON.parse(readFileSync(lockPath, "utf8"));
+    } catch {
+      // An unreadable lock is not permission to ignore it. Something holds
+      // this store and we cannot tell what.
+      throw new StoreLockedError(
+        `${lockPath} exists but could not be read. Another process may be using ` +
+          `${filePath}. Remove the lock file only if you are certain nothing else is running.`,
+        null
+      );
+    }
+
+    if (existing.host !== host) {
+      throw new StoreLockedError(
+        `${filePath} is held by host "${existing.host}" (pid ${existing.pid}, since ` +
+          `${existing.since}). This store has a single writer: two instances appending to it ` +
+          "corrupt each other's proofs. Run one instance, or give each its own OREOCHAIN_DB_PATH " +
+          "on storage it does not share.",
+        existing
+      );
+    }
+
+    if (existing.pid !== pid && isRunning(existing.pid)) {
+      throw new StoreLockedError(
+        `${filePath} is already open by pid ${existing.pid} on this host (since ` +
+          `${existing.since}). Stop it before starting another.`,
+        existing
+      );
+    }
+
+    // Our own pid, or a dead one: a crash left this behind. Take it over.
+    rmSync(lockPath, { force: true });
+    write();
+  }
+
+  heldInThisProcess.add(lockPath);
+
+  return {
+    path: lockPath,
+    release() {
+      heldInThisProcess.delete(lockPath);
+      rmSync(lockPath, { force: true });
+    },
+  };
+}
+
+function isRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+
+  try {
+    // Signal 0 checks for the process without touching it. EPERM means it
+    // exists and belongs to someone else, which still counts as running.
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error.code !== "EPERM") return false;
+    return true;
+  }
+
+  // A zombie still has a pid entry, so kill(0) succeeds for a process that has
+  // already exited and is only waiting to be reaped. Without this, a
+  // supervisor that restarts the gateway faster than it reaps the old one is
+  // refused: measured here, a restart 0.5s after SIGKILL failed to start.
+  return !isZombie(pid);
+}
+
+/** Linux only; anywhere else this cannot be determined and says "not a zombie". */
+function isZombie(pid) {
+  try {
+    return parseProcState(readFileSync(`/proc/${pid}/stat`, "utf8")) === "Z";
+  } catch {
+    // No /proc, or the entry vanished between the two checks. Either way this
+    // says nothing, and "not a zombie" is the conservative answer: it keeps
+    // the lock held rather than letting a second writer in.
+    return false;
+  }
+}
+
+/**
+ * The state character from a /proc/<pid>/stat line.
+ *
+ * The format is "pid (comm) state …" and comm is the executable name
+ * *unescaped* — it can contain spaces and parentheses, which is why this
+ * scans to the final ")" rather than splitting on whitespace. Getting that
+ * wrong would misread the state, and reading a live process as a zombie is
+ * the direction that matters: it would hand the lock to a second writer.
+ */
+function parseProcState(stat) {
+  const end = stat.lastIndexOf(")");
+  if (end === -1) return null;
+  return stat.slice(end + 1).trim()[0] || null;
 }
 
 /**
@@ -179,16 +361,26 @@ function applyRecord(record, index, lineNumber) {
  * @param {string} options.path log file; ":memory:" keeps everything in RAM
  * @param {boolean} [options.fsync] flush each append to disk before returning
  */
-export function openStore({ path: filePath, fsync = true, now = () => Date.now() } = {}) {
+export function openStore({
+  path: filePath,
+  fsync = true,
+  lock = true,
+  now = () => Date.now(),
+} = {}) {
   const inMemory = !filePath || filePath === ":memory:";
 
   let documents = new Map();
   let batches = new Map();
   let order = [];
   let handle = null;
+  let held = null;
 
   if (!inMemory) {
     mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
+
+    // Before reading a byte: this store has exactly one writer, and a second
+    // one is a startup failure rather than something to discover in the data.
+    if (lock) held = acquireLock(path.resolve(filePath), { now });
 
     if (existsSync(filePath)) {
       const replayed = replay(readFileSync(filePath, "utf8"));
@@ -288,8 +480,12 @@ export function openStore({ path: filePath, fsync = true, now = () => Date.now()
         closeSync(handle);
         handle = null;
       }
+      if (held !== null) {
+        held.release();
+        held = null;
+      }
     },
   };
 }
 
-export const _internals = { replay, RECORD_DOCUMENT, RECORD_BATCH, RECORD_ANCHOR };
+export const _internals = { replay, acquireLock, isRunning, isZombie, parseProcState, RECORD_DOCUMENT, RECORD_BATCH, RECORD_ANCHOR };

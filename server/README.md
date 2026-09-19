@@ -258,7 +258,18 @@ directory the frontend needs, add it to `STATIC_DIRECTORIES` in
    drop an upload mid-chunk. Give the orchestrator a termination grace period
    longer than that delay plus your slowest upload, or it will `SIGKILL`
    mid-drain and undo the point of it.
-9. **Put `OREOCHAIN_DB_PATH` on persistent storage and back it up.** It holds
+9. **Run exactly one instance against a given `OREOCHAIN_DB_PATH`.** The store
+   has a single writer and takes a lock file beside it to enforce that: a
+   second process refuses to start and says which host holds it. Two appending
+   to one file would interleave records, so a batch written by one names
+   documents the other cannot produce — an inclusion proof that cannot be
+   rebuilt for a document already anchored on-chain, discovered long after the
+   fact. The lock is advisory and built on exclusive file creation, which NFS
+   does not implement reliably; on NFS-backed storage do not rely on it. To run
+   several gateways today, give each its own store on storage it does not
+   share. Running them against *one* store needs a backend that supports
+   concurrent writers.
+10. **Put `OREOCHAIN_DB_PATH` on persistent storage and back it up.** It holds
    every recorded document and the ordered document list behind every anchored
    batch. That order is the only thing that can prove a document belongs to a
    root once the root is on-chain: lose the file and those documents stay
@@ -299,6 +310,16 @@ checks it exited cleanly — so these stay true rather than rotting quietly.
 The pieces that matter, given the above:
 
 ```yaml
+# One writer, and the gateway enforces it: the proof store is a single
+# appended file with its index in memory, so a second replica refuses to
+# start rather than interleaving appends and leaving anchored documents
+# unprovable. Raising this needs a store that supports concurrent writers
+# (Postgres behind the same interface), not a bigger number here.
+replicas: 1
+strategy:
+  # And with one writer, the new pod must not start before the old one has
+  # released the store.
+  type: Recreate
 livenessProbe:
   httpGet: { path: /health, port: 8787 }
 readinessProbe:
@@ -322,6 +343,9 @@ draining, which is the thing it was asked to do.
 
 Honest list, so nobody assumes otherwise:
 
+- **One instance per proof store.** Enforced at startup rather than left to
+  documentation, but it is still a ceiling: horizontal scaling needs a store
+  with concurrent writers behind the same interface.
 - **No per-user quota or billing.** Rate limiting bounds the *rate*, not the
   total. A client within its rate limit can still pin indefinitely.
 - **Rate-limit buckets and the memory backend still reset on restart.** Neither
