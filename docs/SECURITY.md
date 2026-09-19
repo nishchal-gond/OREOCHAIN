@@ -179,8 +179,13 @@ raising these parameters practical. A server can afford more memory and should
 use it.
 <!-- /kdf:profile -->
 
-Where no worker exists, or where the worker script fails to load, derivation
-falls back to the calling thread: slower and visibly so, but still correct. A
+On Node the same worker runs in a `worker_threads` thread, so a gateway keeps
+serving requests while a passphrase is being stretched rather than stalling its
+event loop for the duration.
+
+Where no worker implementation exists, or where the worker script fails to load,
+derivation falls back to the calling thread: slower and visibly so, but still
+correct. A
 worker that *ran* and failed, or that stopped answering, is reported instead —
 retrying inline would block for the same reason and fail the same way, and a
 timeout quietly followed by a second attempt is how a one-second wait becomes a

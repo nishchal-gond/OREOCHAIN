@@ -70,24 +70,33 @@ export function parseManifestJson(text) {
     fail(`manifest is larger than ${MANIFEST_LIMITS.maxManifestBytes} bytes`);
   }
 
-  // A manifest that mentions these keys at all is hostile — reject it rather
-  // than quietly sanitising, so the caller learns something attacked them.
-  for (const key of FORBIDDEN_KEYS) {
-    if (text.includes(`"${key}"`)) fail(`forbidden key "${key}" present`);
-  }
-
+  // A manifest carrying one of these keys is hostile, and is rejected rather
+  // than quietly sanitised so the caller learns something attacked them.
+  //
+  // The test used to be `text.includes('"__proto__"')` — a scan of the raw
+  // document, which cannot tell a key from a value. An unencrypted manifest
+  // describing a file *named* "constructor" contains `"fileName":"constructor"`
+  // and was rejected on sight, permanently: the chunks are in storage and the
+  // root is on-chain, and nothing will ever open it again. So the reviver does
+  // the detecting instead, where a key is a key.
+  let attacked = null;
   let parsed;
   try {
-    // The reviver is belt-and-braces: it drops the key during parsing, which is
-    // the only reliable way to stop __proto__ being assigned by JSON.parse.
+    // The reviver drops the key during parsing, which is the only reliable way
+    // to stop __proto__ being assigned by JSON.parse; the flag turns that
+    // silent sanitisation back into a refusal.
     parsed = JSON.parse(text, function reviver(key, value) {
-      if (FORBIDDEN_KEYS.has(key)) return undefined;
+      if (FORBIDDEN_KEYS.has(key)) {
+        attacked = key;
+        return undefined;
+      }
       return value;
     });
   } catch (error) {
     if (error instanceof ManifestError) throw error;
     fail(`not valid JSON (${error.message})`);
   }
+  if (attacked !== null) fail(`forbidden key "${attacked}" present`);
 
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     fail("manifest must be a JSON object");

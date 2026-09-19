@@ -15,14 +15,27 @@ export function toHex(bytes) {
   return out;
 }
 
+const HEX_ONLY = /^[0-9a-fA-F]*$/;
+
+/**
+ * Strict hex decoding.
+ *
+ * parseInt() is not a validator: parseInt("1z", 16) is 1, not NaN, so a
+ * per-pair parseInt silently accepts "0x1z" and returns a byte nobody wrote.
+ * Every caller here is decoding a hash or a proof step that arrived from
+ * storage or from a peer, and a decoder that invents bytes for malformed input
+ * turns "this digest is malformed" into "this digest did not match" — or worse,
+ * into a match. Reject the whole string instead.
+ */
 export function fromHex(hex) {
-  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (typeof hex !== "string") throw new Error("hex must be a string");
+  const clean = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
   if (clean.length % 2 !== 0) throw new Error("hex string has odd length");
+  if (!HEX_ONLY.test(clean)) throw new Error("invalid hex string");
+
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) {
-    const byte = parseInt(clean.substr(i * 2, 2), 16);
-    if (Number.isNaN(byte)) throw new Error("invalid hex string");
-    out[i] = byte;
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
   }
   return out;
 }
@@ -58,6 +71,19 @@ export function fromUtf8(bytes) {
 }
 
 export function concat(...arrays) {
+  return concatAll(arrays);
+}
+
+/**
+ * concat() for a list that may be long.
+ *
+ * `concat(...chunks)` spreads the array onto the call stack, and a stack has a
+ * ceiling: a few hundred thousand arguments overflow it. A file restored at a
+ * small chunk size reaches that number comfortably within the limits this
+ * project already enforces, so the assembly step has to take an array rather
+ * than an argument list.
+ */
+export function concatAll(arrays) {
   let total = 0;
   for (const a of arrays) total += a.length;
   const out = new Uint8Array(total);

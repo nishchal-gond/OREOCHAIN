@@ -12,7 +12,7 @@
  * classic second-preimage attack on naive Merkle trees.
  */
 
-import { concat, equalBytes, webcrypto } from "./bytes.js";
+import { concat, concatAll, equalBytes, webcrypto } from "./bytes.js";
 
 /** 256 KiB — the same block size IPFS uses, so our chunks map cleanly onto it. */
 export const DEFAULT_CHUNK_SIZE = 262144;
@@ -44,7 +44,7 @@ export function splitIntoChunks(bytes, chunkSize = DEFAULT_CHUNK_SIZE) {
 
 /** Reverse of splitIntoChunks. */
 export function joinChunks(chunks) {
-  return concat(...chunks);
+  return concatAll(chunks);
 }
 
 export async function leafHash(chunk) {
@@ -134,10 +134,46 @@ export function merkleProofFromLevels(levels, index) {
   return proof;
 }
 
-/** Recompute the root from a leaf plus its proof and compare against `root`. */
-export async function verifyMerkleProof(leaf, proof, root) {
+/**
+ * The most sibling hashes any honest proof can carry.
+ *
+ * A proof has one step per level of the tree above the leaf, so its length is
+ * bounded by log2(leaf count) — 22 steps at this project's four-million-chunk
+ * ceiling, 16 for the largest batch. The bound is what makes verification
+ * cheap against hostile input: a proof arrives from whoever served it, and
+ * without a cap a "proof" of a million steps is a million SHA-256 invocations
+ * the verifier performs before answering false. 64 is far above anything real
+ * and far below anything that costs.
+ */
+export const MAX_PROOF_STEPS = 64;
+
+/**
+ * Recompute the root from a leaf plus its proof and compare against `root`.
+ *
+ * Every step is checked for shape before it is used. `side` in particular used
+ * to be read as "right, or else left", so a step carrying any other value was
+ * silently treated as a left sibling — a malformed proof would then be
+ * evaluated rather than rejected.
+ */
+export async function verifyMerkleProof(leaf, proof, root, options = {}) {
+  const { maxSteps = MAX_PROOF_STEPS } = options;
+
+  if (!Array.isArray(proof)) throw new Error("a Merkle proof must be an array of steps");
+  if (proof.length > maxSteps) {
+    throw new Error(`Merkle proof has ${proof.length} steps, above the maximum of ${maxSteps}`);
+  }
+
   let computed = leaf;
   for (const step of proof) {
+    if (step === null || typeof step !== "object") {
+      throw new Error("every Merkle proof step must be an object");
+    }
+    if (!(step.hash instanceof Uint8Array) || step.hash.length !== 32) {
+      throw new Error("every Merkle proof step needs a 32-byte sibling hash");
+    }
+    if (step.side !== "left" && step.side !== "right") {
+      throw new Error(`Merkle proof step has side "${step.side}", expected "left" or "right"`);
+    }
     computed =
       step.side === "right"
         ? await nodeHash(computed, step.hash)

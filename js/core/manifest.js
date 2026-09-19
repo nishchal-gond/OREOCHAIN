@@ -23,7 +23,7 @@
  */
 
 import {
-  concat,
+  concatAll,
   equalBytes,
   fromBase64,
   fromHex,
@@ -71,6 +71,63 @@ export const MANIFEST_VERSION = "oreochain-manifest-v1";
 const MANIFEST_AAD = `${ENVELOPE_VERSION}/manifest-body`;
 
 /**
+ * Decide whether this call is an encrypting one, and refuse the shapes that
+ * would quietly answer "no".
+ *
+ * `null` (or an omitted option) means "store in the clear" and is honoured. A
+ * passphrase of the wrong type, or an empty one, used to fall through the same
+ * `typeof passphrase === "string" && passphrase.length > 0` test and produce an
+ * unencrypted file — a caller that believed it had encrypted a document would
+ * get a manifest whose `encrypted: false` nobody reads, and the plaintext would
+ * be sitting on a public gateway. Anything other than null or a non-empty
+ * string is a mistake, so it is an error.
+ */
+function shouldEncrypt(passphrase) {
+  if (passphrase === null || passphrase === undefined) return false;
+  if (typeof passphrase !== "string") {
+    throw new Error(
+      `passphrase must be a string or null, received ${typeof passphrase} — ` +
+        "pass null to store a file unencrypted"
+    );
+  }
+  if (passphrase.length === 0) {
+    throw new Error(
+      "passphrase is empty — pass null to store a file unencrypted, rather than \"\""
+    );
+  }
+  return true;
+}
+
+/** The writer's half of validateManifestHeader(): what the reader will demand. */
+function assertPackable(fileBytes, chunkSize, limits) {
+  const bounds = { ...MANIFEST_LIMITS, ...limits };
+
+  if (!(fileBytes instanceof Uint8Array)) {
+    throw new Error("fileBytes must be a Uint8Array");
+  }
+  if (!Number.isInteger(chunkSize) || chunkSize < 1) {
+    throw new Error("chunkSize must be a positive integer");
+  }
+  if (chunkSize > bounds.maxChunkSize) {
+    throw new Error(
+      `chunkSize ${chunkSize} is above the maximum of ${bounds.maxChunkSize}; ` +
+        "a manifest written at this size could never be read back"
+    );
+  }
+  if (fileBytes.length > bounds.maxFileSize) {
+    throw new Error(`file is ${fileBytes.length} bytes, above the maximum of ${bounds.maxFileSize}`);
+  }
+
+  const totalChunks = Math.max(1, Math.ceil(fileBytes.length / chunkSize));
+  if (totalChunks > bounds.maxTotalChunks) {
+    throw new Error(
+      `${fileBytes.length} bytes at chunkSize ${chunkSize} is ${totalChunks} chunks, ` +
+        `above the maximum of ${bounds.maxTotalChunks}`
+    );
+  }
+}
+
+/**
  * Split, hash and (optionally) encrypt a file.
  *
  * @param {Uint8Array} fileBytes raw file content
@@ -81,6 +138,8 @@ const MANIFEST_AAD = `${ENVELOPE_VERSION}/manifest-body`;
  * @param {string} [options.suite] cipher suite name, see js/core/suites.js
  * @param {object|string} [options.kdf] passphrase KDF, see js/core/kdf.js
  * @param {number} [options.chunkSize]
+ * @param {object} [options.limits] overrides for MANIFEST_LIMITS, applied to
+ *   this file's own shape so the writer cannot exceed what the reader allows
  * @param {(done:number,total:number)=>void} [options.onProgress]
  * @returns {Promise<object>} a packed file, ready for the caller to upload
  */
@@ -95,10 +154,16 @@ export async function packFile(fileBytes, options = {}) {
     onProgress,
   } = options;
 
-  const encrypted = typeof passphrase === "string" && passphrase.length > 0;
+  const encrypted = shouldEncrypt(passphrase);
   // Fail fast on an unknown suite or KDF, before doing any expensive work.
   const kdfParams = encrypted ? kdfSpec(kdf) : null;
   if (encrypted) getSuite(suite);
+
+  // The writer is held to the same limits the reader enforces. Without this a
+  // caller can pack, encrypt, upload and anchor a file whose manifest
+  // validateManifestHeader() will reject forever — the bytes are in storage,
+  // the root is on-chain, and nothing can open it again.
+  assertPackable(fileBytes, chunkSize, options.limits || {});
 
   const plainChunks = splitIntoChunks(fileBytes, chunkSize);
   const totalChunks = plainChunks.length;
@@ -169,6 +234,9 @@ export async function packFile(fileBytes, options = {}) {
  * @param {string[]} locations storage id (e.g. IPFS CID) per chunk, in order
  */
 export async function sealManifest(packed, locations) {
+  if (packed === null || typeof packed !== "object") {
+    throw new Error("sealManifest expects the result of packFile()");
+  }
   if (!Array.isArray(locations) || locations.length !== packed.totalChunks) {
     throw new Error(
       `expected ${packed.totalChunks} chunk locations, received ${
@@ -192,6 +260,9 @@ export async function sealManifest(packed, locations) {
       storedSize: chunk.storedSize,
     })),
   };
+  const bodyJson = JSON.stringify(body);
+
+  assertBodyNotAlreadySealed(packed, bodyJson);
 
   const header = {
     version: MANIFEST_VERSION,
@@ -223,17 +294,53 @@ export async function sealManifest(packed, locations) {
     };
 
     const derived = await deriveManifestKey(packed._fileKey, packed._fileSalt);
-    const sealed = await sealWithDerivedKey(
-      utf8(JSON.stringify(body)),
-      derived,
-      MANIFEST_AAD
-    );
+    const sealed = await sealWithDerivedKey(utf8(bodyJson), derived, MANIFEST_AAD);
     header.body = toBase64(sealed);
   } else {
     header.body = body;
   }
 
+  if (packed._fileKey instanceof Uint8Array) sealedBodies.set(packed._fileKey, bodyJson);
   return header;
+}
+
+/**
+ * What one packed file has already been sealed as, so it is never sealed as
+ * something else.
+ *
+ * The manifest body's key AND nonce both come out of one HKDF expansion over
+ * (fileKey, fileSalt), which is safe precisely once: those two values are
+ * generated inside packFile() and never reused, so one packed file means one
+ * key/nonce pair. Seal the same packed file a second time with a different
+ * chunk table — the obvious shape of an upload retry that lands on new CIDs —
+ * and AES-GCM encrypts two different plaintexts under one key and one nonce.
+ * That does not degrade the ciphertext, it removes it: XOR the two and the
+ * keystream cancels, handing anyone who holds both manifests the file name,
+ * the MIME type and every chunk location without the passphrase, plus the
+ * material to forge the authentication tag.
+ *
+ * Keyed on the file key rather than on the packed object, because the file key
+ * is what the nonce is derived from: a shallow copy of `packed` would slip past
+ * an object-keyed guard while reusing the very same key and nonce. A WeakMap so
+ * none of this bookkeeping reaches a caller that serialises what packFile()
+ * returned.
+ */
+const sealedBodies = new WeakMap();
+
+function assertBodyNotAlreadySealed(packed, bodyJson) {
+  // An unencrypted manifest has no derived nonce, so nothing to reuse.
+  if (!packed.encrypted || !(packed._fileKey instanceof Uint8Array)) return;
+
+  const previous = sealedBodies.get(packed._fileKey);
+  // Re-sealing after a transient failure, with the same locations, produces
+  // the same plaintext and therefore the same ciphertext — no reuse, allowed.
+  if (previous === undefined || previous === bodyJson) return;
+
+  throw new Error(
+    "this packed file has already been sealed with a different chunk table. " +
+      "Re-sealing it would encrypt two manifests under one key and nonce and " +
+      "expose both — call packFile() again to seal a different set of locations."
+  );
 }
 
 /**
@@ -328,7 +435,10 @@ export async function restoreFile(manifest, opened, fetchChunk, options = {}) {
     if (onProgress) onProgress(plainChunks.length, manifest.totalChunks);
   }
 
-  const bytes = concat(...plainChunks);
+  // concatAll, not concat(...plainChunks): a file restored at a small chunk
+  // size runs to hundreds of thousands of chunks, and spreading that many
+  // arguments overflows the call stack before a byte is copied.
+  const bytes = concatAll(plainChunks);
 
   // The stream already verified every chunk and the Merkle root. These two
   // checks cover the whole-file invariants a per-chunk pass cannot see.
@@ -382,6 +492,15 @@ export async function* restoreFileStream(manifest, opened, fetchChunk, options =
 
   validateManifestHeader(manifest, limits);
   const entries = [...opened.body.chunks].sort((a, b) => a.index - b.index);
+  // openManifest() already enforces this, but restoreFileStream() also accepts
+  // an `opened` a caller assembled itself — and the Merkle root is now checked
+  // as the last entry is reached, so an empty or short table would otherwise
+  // walk straight past the one check that ties these bytes to the chain.
+  if (entries.length !== manifest.totalChunks) {
+    throw new ManifestError(
+      `chunk table has ${entries.length} entries but the header declares ${manifest.totalChunks}`
+    );
+  }
   entries.forEach((entry, i) => {
     if (entry.index !== i) throw new ManifestError(`chunk table has a gap at index ${i}`);
   });
@@ -413,19 +532,28 @@ export async function* restoreFileStream(manifest, opened, fetchChunk, options =
       const plain = await pending;
 
       start(index + width);
-
       leaves.push(await leafHash(plain));
-      yield { index, bytes: plain, entry: entries[index] };
-    }
 
-    const rootHex = to0x(await merkleRoot(leaves));
-    if (rootHex !== manifest.merkleRoot) {
-      throw new Error("reassembled Merkle root does not match the manifest");
-    }
-    if (expectedMerkleRoot && rootHex !== expectedMerkleRoot.toLowerCase()) {
-      throw new Error(
-        "reassembled Merkle root does not match the root recorded on-chain — this file is not the registered document"
-      );
+      // The root is checked before the last chunk is handed over, not after.
+      // A consumer piping this into an HTTP response has already sent every
+      // byte it received, so a root checked afterwards is a root checked too
+      // late: for an unencrypted file the root is the *only* thing tying these
+      // bytes to the on-chain record, and withholding one chunk is what turns
+      // "we told you afterwards" into "you never got a complete file". The
+      // cost is one chunk of delay at the very end.
+      if (index === entries.length - 1) {
+        const rootHex = to0x(await merkleRoot(leaves));
+        if (rootHex !== manifest.merkleRoot) {
+          throw new Error("reassembled Merkle root does not match the manifest");
+        }
+        if (expectedMerkleRoot && rootHex !== expectedMerkleRoot.toLowerCase()) {
+          throw new Error(
+            "reassembled Merkle root does not match the root recorded on-chain — this file is not the registered document"
+          );
+        }
+      }
+
+      yield { index, bytes: plain, entry: entries[index] };
     }
   } finally {
     inFlight.clear();
@@ -498,12 +626,22 @@ export async function proveChunk(plainChunks, index) {
   };
 }
 
+/**
+ * Returns false, rather than throwing, for a proof that is malformed as well as
+ * one that simply does not verify — both are "no" to the only question a caller
+ * asks here, and every field arrives from whoever served the proof.
+ */
 export async function checkChunkProof(leafHex, proof, rootHex) {
-  return verifyMerkleProof(
-    fromHex(leafHex),
-    proof.map((step) => ({ hash: fromHex(step.hash), side: step.side })),
-    fromHex(rootHex)
-  );
+  try {
+    if (!Array.isArray(proof)) return false;
+    return await verifyMerkleProof(
+      fromHex(leafHex),
+      proof.map((step) => ({ hash: fromHex(step && step.hash), side: step && step.side })),
+      fromHex(rootHex)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export { toHex, to0x };
