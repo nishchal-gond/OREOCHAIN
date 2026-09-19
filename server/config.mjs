@@ -79,6 +79,18 @@ export function loadConfig(env = process.env) {
         max: 64 * KIB * KIB,
       }),
 
+      /**
+       * How many request bodies may be buffered at once, process-wide.
+       *
+       * The per-request cap bounds one body; nothing bounded how many are in
+       * flight. A token bucket does not help — a burst of 120 spends fine in
+       * parallel — so at the default chunk cap that was ~360 MiB from one
+       * well-behaved client, and 23 GiB at a 64 MiB chunk cap. Past this the
+       * gateway sheds load with a 503 instead of running the host out of
+       * memory.
+       */
+      maxConcurrentUploads: readInt("OREOCHAIN_MAX_CONCURRENT_UPLOADS", 32, { min: 1 }),
+
       /** Token bucket: sustained rate and burst, per API key. */
       rateLimitPerMinute: readInt("OREOCHAIN_RATE_LIMIT_PER_MINUTE", 600, { min: 1 }),
       rateLimitBurst: readInt("OREOCHAIN_RATE_LIMIT_BURST", 120, { min: 1 }),

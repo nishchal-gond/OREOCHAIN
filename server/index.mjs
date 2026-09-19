@@ -67,10 +67,43 @@ async function main() {
       if (closing) process.exit(1);
       closing = true;
       console.log(`[oreochain] ${signal} received, draining…`);
-      server.close(() => process.exit(0));
-      setTimeout(() => process.exit(1), 10000).unref();
+
+      server.close(() => {
+        proofs.close();
+        process.exit(0);
+      });
+
+      /*
+       * On Node 19+ close() closes idle keep-alive sockets itself; on Node 18,
+       * which package.json still supports and CI still tests, it waits for
+       * them and the timeout below is what ends the process — hard-exiting and
+       * killing the uploads the drain was meant to protect. Calling this makes
+       * shutdown behave the same across the whole supported range.
+       */
+      if (typeof server.closeIdleConnections === "function") {
+        server.closeIdleConnections();
+      }
+
+      setTimeout(() => {
+        console.error("[oreochain] drain timed out, exiting anyway");
+        process.exit(1);
+      }, 10000).unref();
     });
   }
+
+  /*
+   * A process that dies without saying why is the worst kind of outage. Node
+   * terminates on an unhandled rejection by default, silently, and there was
+   * nothing here to log it.
+   */
+  process.on("unhandledRejection", (reason) => {
+    console.error("[oreochain] unhandled rejection:", reason instanceof Error ? reason.stack : reason);
+    process.exit(1);
+  });
+  process.on("uncaughtException", (error) => {
+    console.error("[oreochain] uncaught exception:", error.stack || error.message);
+    process.exit(1);
+  });
 }
 
 main().catch((error) => {
