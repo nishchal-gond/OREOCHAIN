@@ -64,6 +64,55 @@ async function main() {
     });
     process.exit(1);
   }
+  /*
+   * Confirm the store still holds what was anchored, before anything is served
+   * from it.
+   *
+   * A restore is the case this exists for. The log is append-only JSON lines,
+   * so a copy taken mid-append, or one truncated in transit, reads back
+   * without a parse error and simply has fewer records in it — a batch then
+   * names documents that are gone, and the proof nobody can build is
+   * discovered by the user who needed it. Rebuilding each batch root here
+   * turns that into a refusal to start, which is the one moment an operator is
+   * still looking.
+   */
+  if (config.storeCheck !== "off") {
+    let report;
+    try {
+      report = await proofs.checkIntegrity({ depth: config.storeCheck });
+    } catch (error) {
+      log.error("proof store integrity check failed to run", { message: error.message });
+      process.exit(1);
+    }
+
+    if (report.ok) {
+      log.info("proof store checked", {
+        depth: report.depth,
+        documents: report.checked.documents,
+        batches: report.checked.batches,
+        anchored: report.checked.anchoredBatches,
+        durationMs: report.durationMs,
+      });
+    } else {
+      for (const problem of report.problems) {
+        log.error("proof store problem", problem);
+      }
+      if (!config.allowDamagedStore) {
+        log.error(
+          "the proof store does not agree with itself: restore it from a backup rather than " +
+            "serving proofs that may be wrong. Set OREOCHAIN_ALLOW_DAMAGED_STORE=true to start " +
+            "anyway and serve the intact batches; the damaged ones refuse either way.",
+          { problems: report.problems.length, damagedBatches: report.damagedRoots.length }
+        );
+        process.exit(1);
+      }
+      log.warn("starting with a damaged proof store", {
+        problems: report.problems.length,
+        damagedBatches: report.damagedRoots.length,
+      });
+    }
+  }
+
   if (proofs.ephemeral) {
     log.warn(
       "no OREOCHAIN_RECEIPT_KEY set: receipts are signed with a throwaway key, so every " +

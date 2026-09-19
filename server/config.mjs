@@ -73,6 +73,16 @@ function readList(env, name, fallback = []) {
     .filter(Boolean);
 }
 
+const STORE_CHECKS = new Set(["full", "structural", "off"]);
+
+function readStoreCheck(env, name, fallback) {
+  const raw = (env[name] || fallback).toLowerCase();
+  if (!STORE_CHECKS.has(raw)) {
+    throw new Error(`${name} must be one of ${[...STORE_CHECKS].join(", ")}, got "${raw}"`);
+  }
+  return raw;
+}
+
 function readLevel(env, name, fallback) {
   const raw = (env[name] || fallback).toLowerCase();
   if (!(raw in LEVELS)) {
@@ -188,6 +198,30 @@ export function loadConfig(env = process.env) {
      * ":memory:" opts back into that, for tests.
      */
     dbPath: env.OREOCHAIN_DB_PATH || "./oreochain-proofs.log",
+
+    /**
+     * How hard to check the proof store before serving from it.
+     *
+     * "full" rebuilds every batch root from its stored documents, which is the
+     * only check that proves the store still holds what was anchored — a
+     * backup copied mid-file or restored short parses perfectly and is wrong.
+     * It costs one hash per stored document at startup, so a store with
+     * millions of documents can drop to "structural", which cross-references
+     * batches and documents without hashing and is effectively free. "off" is
+     * for a store checked out of band; it is never the safer choice.
+     */
+    storeCheck: readStoreCheck(env, "OREOCHAIN_STORE_CHECK", "full"),
+
+    /**
+     * Start anyway when the check finds damage.
+     *
+     * Off by default: a store that disagrees with itself is one whose proofs
+     * may be wrong, and the recovery is a restore, not a restart. An operator
+     * who would rather serve the intact batches than nothing at all turns this
+     * on — the damaged ones still refuse individually, because the same
+     * rebuild guards every proof.
+     */
+    allowDamagedStore: env.OREOCHAIN_ALLOW_DAMAGED_STORE === "true",
 
     /**
      * How much the service says. "info" is one line per request outcome;
@@ -369,6 +403,20 @@ export function assertSafeConfig(config, sink = { warn: (message) => console.war
       "OREOCHAIN_ANCHOR_API_KEYS is not set, so the anchoring endpoints refuse every caller " +
         "and batches will be built but never anchored. Set it to the key the anchoring " +
         "worker uses, which must also appear in OREOCHAIN_API_KEYS."
+    );
+  }
+  if (config.storeCheck === "off" && config.dbPath !== ":memory:") {
+    sink.warn(
+      "OREOCHAIN_STORE_CHECK is off, so the proof store is served without confirming that its " +
+        "batches still rebuild to the roots that were anchored. Check it out of band with " +
+        "`npm run verify-store`, or a restore that silently lost records goes unnoticed."
+    );
+  }
+  if (config.allowDamagedStore) {
+    sink.warn(
+      "OREOCHAIN_ALLOW_DAMAGED_STORE is set, so a store that fails its integrity check is " +
+        "served anyway. Proofs from the damaged batches still refuse; every other batch is " +
+        "served as normal."
     );
   }
   if (config.host === "0.0.0.0" && config.allowAnonymous) {

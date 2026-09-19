@@ -25,6 +25,7 @@ import {
   proveWholeBatch,
 } from "../js/core/anchor.js";
 import { readSecret } from "./config.mjs";
+import { checkStore } from "./integrity.mjs";
 import { openStore } from "./store.mjs";
 import {
   generateSigningKey,
@@ -274,6 +275,18 @@ export async function createProofService(options = {}) {
         size: batch.size,
         builtAt: batch.builtAt,
       }));
+    },
+
+    /**
+     * Walk the whole store and confirm it still agrees with itself.
+     *
+     * Exposed here rather than left to the checker script because the gateway
+     * runs it at startup: a store that lost records in a restore parses
+     * cleanly, and the first person to notice would otherwise be a user whose
+     * proof could not be built.
+     */
+    checkIntegrity(options) {
+      return checkStore(store, options);
     },
 
     close() {
