@@ -190,6 +190,24 @@ export function loadConfig(env = process.env) {
     dbPath: env.OREOCHAIN_DB_PATH || "./oreochain-proofs.log",
 
     /**
+     * Where the public keys that have signed receipts are kept. Beside the
+     * store by default, because they are useless without it and losing one
+     * without the other helps nobody.
+     */
+    keyringPath: env.OREOCHAIN_KEYRING_PATH || null,
+
+    /**
+     * Permit signing receipts with a throwaway key.
+     *
+     * Off by default, and the gateway refuses to start without it when no
+     * OREOCHAIN_RECEIPT_KEY is set, because an ephemeral key means every
+     * restart disowns every receipt already issued — a promise in writing
+     * that the service quietly stops honouring. Local development says so out
+     * loud instead.
+     */
+    allowEphemeralReceiptKey: env.OREOCHAIN_EPHEMERAL_RECEIPT_KEY === "true",
+
+    /**
      * How much the service says. "info" is one line per request outcome;
      * "warn" is problems only; "debug" adds per-request detail that is too
      * chatty to leave on. Validated here so a typo fails at startup rather

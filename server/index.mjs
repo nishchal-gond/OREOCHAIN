@@ -20,6 +20,16 @@ import { createManifestVerifier } from "./verify.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * Beside the proof store unless told otherwise. An in-memory store means an
+ * in-memory keyring: receipts that do not survive a restart need no history
+ * of keys to verify them with.
+ */
+function keyringPathFor(config) {
+  if (config.keyringPath) return config.keyringPath;
+  return config.dbPath === ":memory:" ? ":memory:" : `${config.dbPath}.keys.json`;
+}
+
 async function main() {
   // Before the config is read there is no configured level, so start at the
   // default; a configuration error still has to be reportable.
@@ -38,6 +48,23 @@ async function main() {
   const backend = createBackend(config);
 
   const signingKey = readSigningKey();
+
+  /*
+   * A receipt is a promise in writing, and an ephemeral key is a promise the
+   * service stops honouring at its next restart: every receipt already issued
+   * then fails to verify, with the same answer a forgery would get, and the
+   * holder cannot tell which. Fine while developing, never in a deployment,
+   * so it has to be asked for rather than fallen into.
+   */
+  if (!signingKey.privateJwk && !config.allowEphemeralReceiptKey) {
+    log.error(
+      "OREOCHAIN_RECEIPT_KEY is not set. Receipts would be signed with a throwaway key, and " +
+        "every restart would invalidate every receipt already issued. Generate one with " +
+        "`node scripts/generate-receipt-key.mjs`, or set OREOCHAIN_EPHEMERAL_RECEIPT_KEY=true " +
+        "if this is a development instance."
+    );
+    process.exit(1);
+  }
   const verifier = config.verifyManifests ? createManifestVerifier({ backend }) : null;
   if (!verifier) {
     log.warn(
@@ -49,7 +76,12 @@ async function main() {
 
   let proofs;
   try {
-    proofs = await createProofService({ ...signingKey, dbPath: config.dbPath, verifier });
+    proofs = await createProofService({
+      ...signingKey,
+      dbPath: config.dbPath,
+      keyringPath: keyringPathFor(config),
+      verifier,
+    });
   } catch (error) {
     /*
      * Most likely a second instance pointed at one proof store. That is a
@@ -66,9 +98,8 @@ async function main() {
   }
   if (proofs.ephemeral) {
     log.warn(
-      "no OREOCHAIN_RECEIPT_KEY set: receipts are signed with a throwaway key, so every " +
-        "restart invalidates previously issued receipts. Generate one with " +
-        "`node scripts/generate-receipt-key.mjs`"
+      "receipts are signed with a throwaway key, as OREOCHAIN_EPHEMERAL_RECEIPT_KEY allows: " +
+        "every restart invalidates every receipt issued before it"
     );
   }
 

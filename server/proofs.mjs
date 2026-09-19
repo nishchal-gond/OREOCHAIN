@@ -118,6 +118,15 @@ export async function createProofService(options = {}) {
     ephemeral,
     publicJwk: resolvedPublicJwk,
 
+    /** The public key for a kid, current or retired, or null. */
+    publicKeyFor(wanted) {
+      const key = keyring.find(wanted);
+      return key ? { kid: key.kid, publicJwk: key.publicJwk, retiredAt: key.retiredAt } : null;
+    },
+
+    /** Every key this gateway has ever signed with. */
+    keys: () => keyring.list(),
+
     /** Issue a receipt and record the document for the next anchor. */
     async record(document) {
       // Reject anything that cannot be anchored before it is receipted, rather
