@@ -64,6 +64,7 @@ export async function createProofService(options = {}) {
 
   const kid = await keyId(publicKey);
 
+  const verifier = options.verifier || null;
   const store = options.store || openStore({ path: options.dbPath || ":memory:" });
   const batchMaxSize = options.batchMaxSize ?? 1000;
   const batchMaxAgeMs = options.batchMaxAgeMs ?? 3600000;
@@ -125,6 +126,19 @@ export async function createProofService(options = {}) {
       // signed and queued, and only failed later — taking the rest of the
       // pending queue with it.
       const anchorable = normalizeDocument(document);
+
+      /*
+       * Check the claim before signing it. The receipt says this service
+       * accepted this exact document; without this it said so about three
+       * strings it had never checked against anything.
+       *
+       * The flag is set from the result here and nowhere else —
+       * normalizeDocument() strips any the client sent, because a receipt
+       * whose "verified" came from the party being verified is worth nothing.
+       */
+      if (verifier) await verifier.verify(anchorable);
+      anchorable.verified = Boolean(verifier);
+
       const receipt = await issueReceipt(anchorable, privateKey, { issuer, kid });
 
       // Persist before returning: the receipt is a promise in writing, and one
@@ -133,6 +147,9 @@ export async function createProofService(options = {}) {
 
       return { receipt, queued: stored, pending: store.stats().pending };
     },
+
+    /** Whether receipts from this instance assert a checked document. */
+    verifies: Boolean(verifier),
 
     status() {
       const stats = store.stats();
@@ -231,8 +248,14 @@ function normalizeDocument(document) {
   }
 
   const lower = (value) => (typeof value === "string" ? value.toLowerCase() : value);
+
+  // `verified` is this service's own assertion about the document, so a value
+  // arriving from the client is discarded rather than trusted. Everything else
+  // is the client's to state and is checked elsewhere.
+  const { verified: _clientClaimedVerified, ...claimed } = document;
+
   const normalized = {
-    ...document,
+    ...claimed,
     fileHash: lower(document.fileHash),
     merkleRoot: lower(document.merkleRoot),
   };
