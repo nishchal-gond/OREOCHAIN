@@ -231,7 +231,7 @@ if you would rather submit anchors yourself.
 ### `GET /api/proofs/unanchored`
 
 Batches that were built but never confirmed on-chain, oldest first, at most
-100 at a time.
+100 at a time. Needs an anchoring key — see below.
 
 This is how the worker recovers. It owns the funded key and the chain
 connection but not the store, so after a crash between building a batch and
@@ -262,6 +262,29 @@ recording will report again on restart, and that has to be accepted or the
 batch deadlocks. Two different transactions for one root means something
 upstream is wrong, and overwriting would hide it while breaking proofs already
 served.
+
+### Anchoring is a separate privilege
+
+`OREOCHAIN_ANCHOR_API_KEYS` names the subset of `OREOCHAIN_API_KEYS` allowed to
+call `/api/proofs/batch`, `/api/proofs/unanchored` and `/api/proofs/anchored`.
+Every other key gets a `403`, however valid it is for uploading.
+
+The reason is `/api/proofs/anchored`. The transaction hash it records is served
+to everyone who asks for a proof in that batch, so a client that could post a
+well-formed fictitious one would send every verifier to a transaction that does
+not exist — and the real anchor would then be rejected as a conflict, leaving
+the batch permanently misreported. Uploading and anchoring are different jobs;
+they get different keys.
+
+It fails closed. With `OREOCHAIN_ANCHOR_API_KEYS` unset nothing may anchor, and
+the gateway warns at startup that batches will be built and never anchored. An
+entry that is not also in `OREOCHAIN_API_KEYS` is refused at startup, since
+that key could never authenticate in the first place.
+
+`OREOCHAIN_ALLOW_ANONYMOUS=true` grants it to everyone, because an anonymous
+gateway has no boundary to be inside of — anyone who can reach the port can
+already upload and record. That is for local development, not for a
+deployment.
 
 ### `GET /api/proofs/key` — public
 
@@ -323,14 +346,20 @@ node server/anchor-worker.mjs
 | `OREOCHAIN_CHAIN_RPC` | yes | JSON-RPC endpoint to submit through |
 | `OREOCHAIN_CONTRACT_ADDRESS` | yes | the deployed `ChunkedVerification` |
 | `OREOCHAIN_ANCHOR_KEY` / `_FILE` | yes | funded private key, `0x` + 64 hex |
-| `OREOCHAIN_ANCHOR_API_KEY` / `_FILE` | yes | one of the gateway's `OREOCHAIN_API_KEYS` |
+| `OREOCHAIN_ANCHOR_API_KEY` / `_FILE` | yes | a key in the gateway's `OREOCHAIN_ANCHOR_API_KEYS` |
 | `OREOCHAIN_GATEWAY_URL` | no | default `http://127.0.0.1:8787` |
 | `OREOCHAIN_ANCHOR_INTERVAL_MS` | no | default `60000` |
 | `OREOCHAIN_ANCHOR_CONFIRMATIONS` | no | default `3` |
 | `OREOCHAIN_ANCHOR_URI` | no | proof URL written into the anchor; `{root}` is substituted |
 | `OREOCHAIN_ANCHOR_PENDING_TIMEOUT_MS` | no | default `600000`, when to resend a transaction that never mined |
 
-Three things are true of that key beyond holding it: the address must be
+Note the two different keys. `OREOCHAIN_ANCHOR_KEY` is the chain key that pays
+for transactions; `OREOCHAIN_ANCHOR_API_KEY` is how the worker authenticates to
+the gateway, and the gateway must list it in its own
+`OREOCHAIN_ANCHOR_API_KEYS`. Issue it to the worker alone, so it can be revoked
+without touching any client.
+
+Three things are true of the chain key beyond holding it: the address must be
 **funded**, it must be an **authorised exporter** on the contract
 (`addExporter(address, info)`, callable only by the contract owner), and it
 must be **nowhere near the gateway**. The worker is a separate process
@@ -382,6 +411,7 @@ more.
 |---|---|---|
 | `cannot anchor against this chain` at startup | preflight failed | read the message: wrong address, unauthorised exporter, or no balance |
 | `cannot read unanchored batches` | the gateway is unreachable or the API key is wrong | the worker keeps ticking; fix and it catches up |
+| `returned 403` from the gateway | the worker's API key is not in `OREOCHAIN_ANCHOR_API_KEYS` | add it there and restart the gateway |
 | `a sent anchor never mined, resubmitting` | the transaction was dropped | usually gas; the contract rejects a duplicate anchor, so a resend is safe |
 | `anchored batch has no recoverable transaction hash` | the batch **is** anchored, but the RPC has pruned the log | `POST /api/proofs/anchored` with the hash by hand, from a block explorer |
 | `oreochain_documents_pending` climbing | nothing is being anchored | check the worker is running at all |

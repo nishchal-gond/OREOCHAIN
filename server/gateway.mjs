@@ -636,6 +636,26 @@ export function createHandler(config, backend, deps = {}) {
           return;
         }
 
+        /*
+         * Anchoring is a privilege of its own, held by the worker's key and
+         * nothing else. Checked once here rather than at each of the three
+         * routes, so a fourth cannot be added without it.
+         */
+        const anchoring =
+          url.pathname === "/api/proofs/batch" ||
+          url.pathname === "/api/proofs/unanchored" ||
+          url.pathname === "/api/proofs/anchored";
+        if (proofs && anchoring && !auth.canAnchor) {
+          fail(403, {
+            error:
+              "this key may not drive anchoring — add it to OREOCHAIN_ANCHOR_API_KEYS if it " +
+              "belongs to the anchoring worker",
+          });
+          log.warn("anchoring refused", { keyId: auth.keyId, route });
+          metrics.increment("oreochain_auth_failures_total", { reason: "not an anchor key" });
+          return;
+        }
+
         if (proofs && url.pathname === "/api/proofs/status" && req.method === "GET") {
           sendJson(res, 200, proofs.status());
           return;

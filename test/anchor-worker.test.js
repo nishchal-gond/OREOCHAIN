@@ -32,6 +32,8 @@ const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const KEY = "w".repeat(48);
+/** The worker's own credential; an uploader's key may not drive anchoring. */
+const UPLOAD_KEY = "u".repeat(48);
 const OWNER_HEX = "0x" + "11".repeat(20);
 const ANCHOR_HEX = "0x" + "22".repeat(20);
 
@@ -264,7 +266,12 @@ async function testChain() {
 /** A real gateway on an ephemeral port, with a real proof service behind it. */
 async function startGateway({ batchMaxSize = 2, batchMaxAgeMs = 3_600_000 } = {}) {
   const config = assertSafeConfig(
-    loadConfig({ OREOCHAIN_API_KEYS: KEY, OREOCHAIN_STORAGE: "memory" })
+    loadConfig({
+      OREOCHAIN_API_KEYS: `${UPLOAD_KEY},${KEY}`,
+      OREOCHAIN_ANCHOR_API_KEYS: KEY,
+      OREOCHAIN_STORAGE: "memory",
+    }),
+    { warn: () => {} }
   );
   const proofs = await createProofService({ batchMaxSize, batchMaxAgeMs });
   const handler = createHandler(config, createMemoryBackend(), {
@@ -306,7 +313,7 @@ async function recordDocuments(gw, count) {
     const document = aDocument();
     const response = await fetch(`${gw.url}/api/proofs/record`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${UPLOAD_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify(document),
     });
     assert.equal(response.status, 200);

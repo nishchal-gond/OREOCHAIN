@@ -32,11 +32,18 @@ import { openManifest, packFile, restoreFile, sealManifest } from "../js/core/ma
 const TEST_KDF = { name: "argon2id", memoryKiB: 8, iterations: 1, parallelism: 1 };
 
 const KEY = "k".repeat(48);
+/**
+ * A second key, the only one allowed to drive anchoring. Every anchoring test
+ * below uses this and every other test uses KEY, so the separation is
+ * exercised by the whole suite rather than asserted once.
+ */
+const ANCHOR_KEY = "a".repeat(48);
 const TEST_LIMITS = { minArgon2MemoryKiB: 8 };
 
 function baseEnv(overrides = {}) {
   return {
-    OREOCHAIN_API_KEYS: KEY,
+    OREOCHAIN_API_KEYS: `${KEY},${ANCHOR_KEY}`,
+    OREOCHAIN_ANCHOR_API_KEYS: ANCHOR_KEY,
     OREOCHAIN_STORAGE: "memory",
     ...overrides,
   };
@@ -74,6 +81,11 @@ async function startGateway(envOverrides = {}, deps = {}) {
 
 function authed(extra = {}) {
   return { Authorization: `Bearer ${KEY}`, ...extra };
+}
+
+/** The anchoring worker's credential, which an uploader's key is not. */
+function anchorAuthed(extra = {}) {
+  return { Authorization: `Bearer ${ANCHOR_KEY}`, ...extra };
 }
 
 // ------------------------------------------------------------ configuration
@@ -411,6 +423,7 @@ test("a disallowed origin gets no CORS grant", async () => {
 test("anonymous callers are rate limited by source address, not as one pool", async () => {
   const gw = await startGateway({
     OREOCHAIN_API_KEYS: "",
+    OREOCHAIN_ANCHOR_API_KEYS: "",
     OREOCHAIN_ALLOW_ANONYMOUS: "true",
     OREOCHAIN_RATE_LIMIT_PER_MINUTE: "60",
     OREOCHAIN_RATE_LIMIT_BURST: "2",
@@ -1033,7 +1046,7 @@ test("many documents anchor in one batch, and each still proves independently", 
     assert.equal(status.pending, 12);
 
     const { batch } = await (
-      await fetch(`${gw.url}/api/proofs/batch`, { method: "POST", headers: authed() })
+      await fetch(`${gw.url}/api/proofs/batch`, { method: "POST", headers: anchorAuthed() })
     ).json();
     assert.equal(batch.size, 12);
     assert.match(batch.root, /^0x[0-9a-f]{64}$/);
@@ -1064,7 +1077,7 @@ test("building a batch with nothing pending is not an error", async () => {
   try {
     const response = await fetch(`${gw.url}/api/proofs/batch`, {
       method: "POST",
-      headers: authed(),
+      headers: anchorAuthed(),
     });
     assert.equal(response.status, 200);
     assert.equal((await response.json()).batch, null);
@@ -1173,7 +1186,7 @@ async function buildOneBatch(gw, count = 2) {
     assert.equal(response.status, 200);
   }
   const { batch } = await (
-    await fetch(`${gw.url}/api/proofs/batch`, { method: "POST", headers: authed() })
+    await fetch(`${gw.url}/api/proofs/batch`, { method: "POST", headers: anchorAuthed() })
   ).json();
   return batch;
 }
@@ -1181,7 +1194,7 @@ async function buildOneBatch(gw, count = 2) {
 function reportAnchor(gw, body) {
   return fetch(`${gw.url}/api/proofs/anchored`, {
     method: "POST",
-    headers: authed({ "Content-Type": "application/json" }),
+    headers: anchorAuthed({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
 }
@@ -1190,7 +1203,7 @@ test("a built batch is listed as unanchored until a transaction is reported", as
   const gw = await startGateway();
   try {
     const listed = async () =>
-      (await (await fetch(`${gw.url}/api/proofs/unanchored`, { headers: authed() })).json())
+      (await (await fetch(`${gw.url}/api/proofs/unanchored`, { headers: anchorAuthed() })).json())
         .batches;
 
     assert.deepEqual(await listed(), [], "nothing is owed an anchor yet");
@@ -1284,6 +1297,91 @@ test("re-reporting the same transaction is fine; a different one is a conflict",
   } finally {
     await gw.stop();
   }
+});
+
+test("an uploader's key cannot drive anchoring", async () => {
+  const gw = await startGateway();
+  try {
+    const batch = await buildOneBatch(gw);
+
+    /*
+     * The privilege that matters. A key that can record a document must not
+     * also be able to declare a batch anchored: the transaction hash it
+     * supplies is served to everyone who asks for a proof in that batch, and
+     * a well-formed fictitious one would send every verifier to a
+     * transaction that does not exist — and then make the real anchor a 409,
+     * so the batch could never be corrected.
+     */
+    const forged = await fetch(`${gw.url}/api/proofs/anchored`, {
+      method: "POST",
+      headers: authed({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ root: batch.root, txHash: "0x" + "de".repeat(32), block: 1 }),
+    });
+    assert.equal(forged.status, 403);
+    assert.match((await forged.json()).error, /OREOCHAIN_ANCHOR_API_KEYS/);
+
+    // Reading what is outstanding, and forcing a batch, are the same
+    // privilege: both are the worker's business.
+    assert.equal(
+      (await fetch(`${gw.url}/api/proofs/unanchored`, { headers: authed() })).status,
+      403
+    );
+    assert.equal(
+      (await fetch(`${gw.url}/api/proofs/batch`, { method: "POST", headers: authed() })).status,
+      403
+    );
+
+    // And the uploader key still does everything it is for.
+    assert.equal(
+      (await fetch(`${gw.url}/api/proofs/status`, { headers: authed() })).status,
+      200
+    );
+
+    // The real anchor still lands, because nothing forged got through.
+    const real = await reportAnchor(gw, {
+      root: batch.root,
+      txHash: "0x" + "0c".repeat(32),
+      block: 5,
+    });
+    assert.equal(real.status, 200);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("with no anchoring key configured, nothing may anchor", async () => {
+  // Fail closed. The alternative — every authenticated key may anchor until
+  // the operator narrows it — is the state this privilege exists to end.
+  const gw = await startGateway({ OREOCHAIN_ANCHOR_API_KEYS: "" });
+  try {
+    const response = await fetch(`${gw.url}/api/proofs/unanchored`, { headers: authed() });
+    assert.equal(response.status, 403);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a configuration naming an anchoring key that cannot authenticate is refused", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        OREOCHAIN_API_KEYS: KEY,
+        OREOCHAIN_ANCHOR_API_KEYS: ANCHOR_KEY,
+        OREOCHAIN_STORAGE: "memory",
+      }),
+    /must also be in OREOCHAIN_API_KEYS/,
+    "otherwise the worker is rejected at authentication and the privilege never comes up"
+  );
+});
+
+test("a gateway with no anchoring key warns that nothing will be anchored", () => {
+  const warnings = [];
+  assertSafeConfig(
+    loadConfig({ OREOCHAIN_API_KEYS: KEY, OREOCHAIN_STORAGE: "memory" }),
+    { warn: (message) => warnings.push(message) }
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /built but never anchored/);
 });
 
 test("reporting an anchor needs a credential", async () => {

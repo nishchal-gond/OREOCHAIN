@@ -100,6 +100,23 @@ export function loadConfig(env = process.env) {
     }
   }
 
+  /*
+   * The subset of keys allowed to drive anchoring. A separate privilege on
+   * purpose: an uploader's key that could also declare a batch anchored could
+   * point every verifier of that batch at a transaction that does not exist,
+   * and then block the real one as a conflict.
+   */
+  const anchorApiKeys = readList(env, "OREOCHAIN_ANCHOR_API_KEYS");
+  for (const key of anchorApiKeys) {
+    if (!apiKeys.includes(key)) {
+      throw new Error(
+        "every OREOCHAIN_ANCHOR_API_KEYS entry must also be in OREOCHAIN_API_KEYS — one is " +
+          "not, so the worker holding it would be rejected before its privileges were " +
+          "considered at all"
+      );
+    }
+  }
+
   const pinataJwt = readSecret(env, "PINATA_JWT");
   if (!pinataJwt && env.OREOCHAIN_STORAGE !== "memory") {
     throw new Error(
@@ -112,6 +129,7 @@ export function loadConfig(env = process.env) {
     host: env.HOST || "127.0.0.1",
 
     apiKeys,
+    anchorApiKeys,
     allowAnonymous,
 
     storage: env.OREOCHAIN_STORAGE === "memory" ? "memory" : "pinata",
@@ -344,6 +362,13 @@ export function assertSafeConfig(config, sink = { warn: (message) => console.war
       'OREOCHAIN_DB_PATH is ":memory:", so recorded documents and anchored batches are lost ' +
         "on restart. A document anchored on-chain then has no recoverable inclusion proof. " +
         "Point it at a file on persistent storage."
+    );
+  }
+  if (config.anchorApiKeys.length === 0 && !config.allowAnonymous) {
+    sink.warn(
+      "OREOCHAIN_ANCHOR_API_KEYS is not set, so the anchoring endpoints refuse every caller " +
+        "and batches will be built but never anchored. Set it to the key the anchoring " +
+        "worker uses, which must also appear in OREOCHAIN_API_KEYS."
     );
   }
   if (config.host === "0.0.0.0" && config.allowAnonymous) {
