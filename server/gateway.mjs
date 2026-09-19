@@ -613,6 +613,10 @@ export function createHandler(config, backend, deps = {}) {
           try {
             result = await proofs.record(document);
           } catch (error) {
+            // A manifest that could not be read is worth retrying; one that
+            // disagrees with the document never will be. Saying which saves
+            // the client guessing from a status code alone.
+            if (error.retryable && !res.headersSent) res.setHeader("Retry-After", "5");
             throw Object.assign(error, { status: error.status || 400 });
           }
           sendJson(res, 200, result);

@@ -20,7 +20,8 @@
     "abi": "node scripts/generate-abi.mjs",
     "kdf-docs": "node scripts/sync-kdf-docs.mjs",
     "test:e2e": "node --test test/e2e/*.test.js",
-    "vendor": "node scripts/vendor-noble.mjs"
+    "vendor": "node scripts/vendor-noble.mjs",
+    "test-count": "node scripts/sync-test-count.mjs"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",

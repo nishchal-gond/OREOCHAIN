@@ -342,24 +342,98 @@ test("the refusal names the other holder and what to do about it", () => {
   assert.equal(error.holder.host, "gateway-replica-2");
 });
 
-test("a container restart takes over its own lock instead of refusing", () => {
+test("a container restart takes over its own lock once the lease has lapsed", () => {
   const file = path.join(tempDir(), "proofs.log");
 
   // A pod keeps its name across a container restart and the process is pid 1
   // again, so the lock it left behind looks exactly like its own. Treating
-  // that as a conflict would refuse to start after every crash.
+  // that as a conflict would refuse to start after every crash — but taking
+  // it over on identity alone is what let two live containers both acquire,
+  // so what makes it safe is that nothing has refreshed the heartbeat.
   writeFileSync(
     `${path.resolve(file)}.lock`,
     JSON.stringify({
       host: os.hostname(),
       pid: process.pid,
       since: "2026-09-19T08:00:00Z",
+      heartbeat: Date.now() - 60000,
     })
   );
 
   const store = openStore({ path: file });
   store.recordDocument(doc(1), { signature: "s" });
   store.close();
+});
+
+test("a live holder sharing our hostname and pid is refused, not taken over", () => {
+  const file = path.join(tempDir(), "proofs.log");
+
+  // Two containers can both be pid 1 with one hostname — `docker run
+  // --hostname shared` twice against a volume, or hostNetwork pods on an RWX
+  // volume. From inside a PID namespace /proc/1 is *us*, so the neighbour is
+  // unobservable and a dead predecessor leaves a byte-identical file. A
+  // moving heartbeat is the only thing that tells them apart.
+  writeFileSync(
+    `${path.resolve(file)}.lock`,
+    JSON.stringify({
+      host: os.hostname(),
+      pid: process.pid,
+      since: "2026-09-19T08:00:00Z",
+      heartbeat: Date.now(),
+    })
+  );
+
+  const error = (() => {
+    try {
+      openStore({ path: file });
+    } catch (e) {
+      return e;
+    }
+  })();
+
+  assert.ok(error instanceof StoreLockedError, "a live neighbour's store was taken over");
+  assert.match(error.message, /live process/);
+  // It says when to come back rather than leaving the operator guessing.
+  assert.match(error.message, /retry in \d+s/);
+});
+
+test("a holder refreshes its heartbeat, so its lock does not age out under it", async () => {
+  const file = path.join(tempDir(), "proofs.log");
+  const store = openStore({ path: file });
+  const lockPath = `${path.resolve(file)}.lock`;
+
+  const first = JSON.parse(readFileSync(lockPath, "utf8")).heartbeat;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  // Driven directly rather than waiting out the real interval, which would
+  // make this test sleep for seconds to prove one field moves.
+  store.beat();
+  const second = JSON.parse(readFileSync(lockPath, "utf8")).heartbeat;
+
+  assert.ok(second > first, "the heartbeat did not advance");
+  store.close();
+});
+
+test("a lock from a version without heartbeats is refused rather than guessed", () => {
+  const file = path.join(tempDir(), "proofs.log");
+  writeFileSync(
+    `${path.resolve(file)}.lock`,
+    JSON.stringify({ host: os.hostname(), pid: process.pid, since: "2026-09-19T08:00:00Z" })
+  );
+
+  // No evidence either way, and this is the branch where guessing wrong means
+  // two writers. The message says exactly what to do about it.
+  const error = (() => {
+    try {
+      openStore({ path: file });
+    } catch (e) {
+      return e;
+    }
+  })();
+
+  assert.ok(error instanceof StoreLockedError);
+  assert.match(error.message, /older version with no heartbeat/);
+  assert.match(error.message, /delete/);
 });
 
 test("a lock left by a dead process on this host is taken over", () => {

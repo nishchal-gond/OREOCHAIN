@@ -16,6 +16,7 @@ import { createBackend } from "./storage.mjs";
 import { createHandler } from "./gateway.mjs";
 import { createLogger } from "./log.mjs";
 import { createProofService, readSigningKey } from "./proofs.mjs";
+import { createManifestVerifier } from "./verify.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -37,10 +38,18 @@ async function main() {
   const backend = createBackend(config);
 
   const signingKey = readSigningKey();
+  const verifier = config.verifyManifests ? createManifestVerifier({ backend }) : null;
+  if (!verifier) {
+    log.warn(
+      "OREOCHAIN_VERIFY_MANIFESTS is false: receipts are signed without checking the document " +
+        "against its manifest, so a receipt asserts only what the client claimed. Each receipt " +
+        'records this as "verified": false.'
+    );
+  }
 
   let proofs;
   try {
-    proofs = await createProofService({ ...signingKey, dbPath: config.dbPath });
+    proofs = await createProofService({ ...signingKey, dbPath: config.dbPath, verifier });
   } catch (error) {
     /*
      * Most likely a second instance pointed at one proof store. That is a

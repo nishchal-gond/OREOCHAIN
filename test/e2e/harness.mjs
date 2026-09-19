@@ -55,7 +55,15 @@ export function loadPlaywright() {
   return null;
 }
 
-/** Start the gateway on an ephemeral port, serving the repository's pages. */
+/**
+ * Start the gateway on an ephemeral port, serving the repository's pages.
+ *
+ * Anonymous, because the browser is the client here and giving a page an API
+ * key would mean shipping a credential to every visitor — which is the bug
+ * this repository already shipped once. It also means the test needs no
+ * OREOCHAIN_ANCHOR_API_KEYS entry if it ever reaches the anchoring routes,
+ * which are key-scoped; today nothing in the frontend calls them.
+ */
 export async function startGateway(envOverrides = {}) {
   const config = assertSafeConfig(
     loadConfig({
