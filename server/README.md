@@ -146,6 +146,16 @@ storage: {
 Serving the frontend from the gateway itself (`OREOCHAIN_SERVE_STATIC=true`)
 removes cross-origin requests entirely, which is the simplest deployment.
 
+The static root is the repository, so what may be served is an explicit
+allowlist rather than everything in it — otherwise `.git`, the server sources
+and `js/config.js` would all be URLs. Served: `.html` pages at the root, and
+`css/`, `js/`, `assets/`, `files/`, plus `node_modules/web3/dist/` and
+`node_modules/@noble/{hashes,ciphers}/esm/`, which the pages load directly. A
+file must also have an extension the frontend actually uses, so source maps and
+`.ts` sources stay unreachable. Anything else is a 404. **If you add a
+directory the frontend needs, add it to `STATIC_DIRECTORIES` in
+`server/gateway.mjs`.**
+
 ## Deployment notes
 
 1. **Run a supported Node.** The code works on Node 18, but 18 is past

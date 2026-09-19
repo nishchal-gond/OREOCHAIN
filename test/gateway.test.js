@@ -7,9 +7,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { loadConfig, assertSafeConfig } from "../server/config.mjs";
-import { createHandler } from "../server/gateway.mjs";
+import { createHandler, _internals as gatewayInternals } from "../server/gateway.mjs";
 import { createMemoryBackend } from "../server/storage.mjs";
 import { authenticate, extractToken } from "../server/auth.mjs";
 import { createRateLimiter } from "../server/ratelimit.mjs";
@@ -421,6 +423,106 @@ test("anonymous callers are rate limited by source address, not as one pool", as
   } finally {
     await gw.stop();
   }
+});
+
+// ---------------------------------------------------------- static frontend
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("serving the frontend does not serve the rest of the repository", async () => {
+  const gw = await startGateway({ OREOCHAIN_SERVE_STATIC: "true" }, { staticRoot: REPO_ROOT });
+  try {
+    // The static root is the repository, so everything below is a real file
+    // sitting next to the pages. Each one used to come back 200.
+    const secret = [
+      "/.git/config",
+      "/.git/HEAD",
+      "/server/config.mjs",
+      "/server/gateway.mjs",
+      "/package.json",
+      "/package-lock.json",
+      "/auto_update.txt",
+      "/test/gateway.test.js",
+      "/node_modules/.package-lock.json",
+      "/node_modules/web3/package.json",
+      "/js/kkk.java",
+    ];
+
+    for (const pathname of secret) {
+      const response = await fetch(`${gw.url}${pathname}`);
+      assert.equal(response.status, 404, `${pathname} is reachable`);
+    }
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("serving the frontend still serves the frontend", async () => {
+  const gw = await startGateway({ OREOCHAIN_SERVE_STATIC: "true" }, { staticRoot: REPO_ROOT });
+  try {
+    // Every page, plus one file from each allowlisted directory — including the
+    // two node_modules bundles the pages load directly, which is the reason the
+    // allowlist cannot simply exclude node_modules.
+    const expected = [
+      ["/", "text/html"],
+      ["/index.html", "text/html"],
+      ["/upload.html", "text/html"],
+      ["/verify.html", "text/html"],
+      ["/retrieve.html", "text/html"],
+      ["/admin.html", "text/html"],
+      ["/delete.html", "text/html"],
+      ["/css/main.css", "text/css"],
+      ["/js/chunked-app.js", "text/javascript"],
+      ["/js/core/kdf.js", "text/javascript"],
+      ["/js/storage/ipfs.js", "text/javascript"],
+      ["/files/loader.svg", "image/svg+xml"],
+      ["/assets/images/icon.png", "image/png"],
+      ["/node_modules/web3/dist/web3.min.js", "text/javascript"],
+      ["/node_modules/@noble/hashes/esm/argon2.js", "text/javascript"],
+      ["/node_modules/@noble/ciphers/esm/chacha.js", "text/javascript"],
+    ];
+
+    for (const [pathname, type] of expected) {
+      const response = await fetch(`${gw.url}${pathname}`);
+      assert.equal(response.status, 200, `${pathname} is not served`);
+      assert.ok(
+        response.headers.get("content-type").startsWith(type),
+        `${pathname} served as ${response.headers.get("content-type")}, expected ${type}`
+      );
+      await response.arrayBuffer();
+    }
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("traversal out of the static root is refused", async () => {
+  const gw = await startGateway({ OREOCHAIN_SERVE_STATIC: "true" }, { staticRoot: REPO_ROOT });
+  try {
+    for (const pathname of ["/../etc/passwd", "/js/../../etc/passwd", "/%2e%2e/etc/passwd"]) {
+      const response = await fetch(`${gw.url}${pathname}`);
+      assert.ok(response.status === 403 || response.status === 404, `${pathname} -> ${response.status}`);
+      assert.ok(!(await response.text()).includes("root:"));
+    }
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("the allowlist is a prefix match on directories, not a substring match", () => {
+  const { isServablePath } = gatewayInternals;
+
+  assert.equal(isServablePath("index.html"), true);
+  assert.equal(isServablePath("js/core/kdf.js"), true);
+  assert.equal(isServablePath("node_modules/@noble/hashes/esm/argon2.js"), true);
+
+  assert.equal(isServablePath("package.json"), false);
+  assert.equal(isServablePath(".git/config"), false);
+  assert.equal(isServablePath("server/config.mjs"), false);
+  assert.equal(isServablePath("node_modules/ws/index.js"), false);
+  // A sibling directory whose name merely starts with an allowed one.
+  assert.equal(isServablePath("js-private/secrets.js"), false);
+  assert.equal(isServablePath("cssx/leak.css"), false);
 });
 
 test("an unknown endpoint is a 404", async () => {
