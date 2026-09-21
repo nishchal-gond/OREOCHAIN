@@ -152,8 +152,10 @@ document was shared with to anyone who can fetch the CID, which is usually the
 more sensitive of the two facts. Opening a file instead tries each entry until
 one decrypts, bounded at 64 entries.
 
-Available today in `js/core/` and from the CLI; the shipped web pages still
-offer only the passphrase field.
+On the upload page, paste recipient keys into **Share with**, one per line; on
+the retrieve page, paste your identity into **Your identity**. A document may
+carry both routes, and the retrieve page asks for whichever one the document it
+just fetched actually offers.
 
 Each chunk's authentication tag also covers *where it sits*:
 
@@ -353,7 +355,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              590 tests, including EVM cross-checks
+test/                              593 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -398,7 +400,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test           # 590 tests
+npm test           # 593 tests
 npm run test:e2e   # the pages driven in a real browser (needs Playwright)
 npm run abi        # regenerate js/contract-abi.js after changing the contract
 npm run vendor     # regenerate js/vendor/noble after changing a @noble version
@@ -469,19 +471,20 @@ undocumented is a security system nobody can evaluate.
 
 In priority order, with reasoning rather than dates:
 
-1. **Recipient keys in the web UI.** The wrapping is implemented and tested in
-   `js/core/recipients.js`, and the pages do not expose it yet: sharing a file
-   today means driving the core from a script.
-2. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap)
+1. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap)
    for records that must stay confidential for decades. "Harvest now, decrypt
-   later" is a real concern for long-lived documents.
+   later" is a real concern for long-lived documents, and most of all for a
+   recipient wrap: it is a public ciphertext against a long-term key, which is
+   exactly what harvesting collects.
+2. **A directory for recipient keys.** Sharing currently means someone passing
+   you their key out of band, and trusting that the key you pasted is theirs.
 3. **Replication across independent pinning providers**, with on-chain
    challenges proving a provider still holds a given block.
 4. **A professional cryptographic review**, before this protects anything that
    matters.
 
 Shipped since this list was last written: automated batch submission, and
-multi-recipient key wrapping in the core.
+multi-recipient key wrapping, in the core and on the pages.
 
 ---
 

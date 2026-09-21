@@ -129,6 +129,23 @@
           placeholder="Leave blank for public documents"
         />
 
+        <label class="form-label mt-3" for="retrieve-identity">
+          Your identity
+          <span class="text-muted">(only for documents shared to your key)</span>
+        </label>
+        <input
+          id="retrieve-identity"
+          class="form-control"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="oreo-identity-v1:…"
+        />
+        <p class="form-text">
+          The private half of your recipient key. It is used in this tab and
+          never uploaded — neither the gateway nor the pinning service sees it.
+        </p>
+
         <span id="note" class="text-danger d-block my-2"></span>
         <img id="loader" class="d-none" src="files/loader.svg" alt="loader" />
 

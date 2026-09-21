@@ -70,7 +70,8 @@ entry          = E, AES-256-GCM(wrap, fileKey, aad="<envelope>|recipient|<fileHa
 Generate a pair with `npm run recipient-key`: the identity goes to stdout, so it
 can be redirected into a file, and the recipient key to stderr so it stays on
 screen. Pass recipient keys to `packFile({ recipients: [...] })` and open with
-`openManifest(manifest, null, { identity })`.
+`openManifest(manifest, null, { identity })`. On the pages these are the
+**Share with** box on `upload.html` and **Your identity** on `retrieve.html`.
 
 A file may carry a passphrase wrap, recipient wraps, or both; an encrypted
 manifest carrying neither is rejected by `validateManifestHeader`, because it

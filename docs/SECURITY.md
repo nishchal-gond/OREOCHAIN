@@ -340,9 +340,10 @@ never reaches a browser — a browser cannot keep a secret, and any token shippe
 to the page is readable by every visitor.
 
 The important property is what the gateway is *not* trusted with: it never
-receives a passphrase, a file key or plaintext. Chunks arrive already sealed. A
-full compromise of that server exposes ciphertext, chunk sizes and traffic
-timing, not documents.
+receives a passphrase, a recipient identity, a file key or plaintext. Chunks
+arrive already sealed, and an identity typed into the retrieve page is used to
+unwrap in that tab and goes nowhere else. A full compromise of that server
+exposes ciphertext, chunk sizes and traffic timing, not documents.
 
 Its own defences are conventional but deliberate: constant-time API key
 comparison (a naive `===` on a secret leaks it through timing, one character at
@@ -486,9 +487,10 @@ an audit.
 
 ## 6. Roadmap, in priority order
 
-1. **Recipient keys in the web UI.** §2.7 is implemented and tested in
-   `js/core/recipients.js`; the shipped pages still offer only the passphrase
-   field, so sharing today means driving the core from a script.
+1. **A directory for recipient keys.** §2.7 gives a document's sender a way to
+   seal to a key; it says nothing about how they came to believe that key is
+   whose they think it is. Today that is an out-of-band exchange and the trust
+   that goes with one.
 2. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap) for
    documents that must stay confidential for decades. "Harvest now, decrypt
    later" is a real concern for long-lived records, and it applies with most
@@ -500,4 +502,4 @@ an audit.
    matters.
 
 Shipped since this list was last written: the backend pinning proxy (the
-gateway), and multi-recipient key wrapping in the core.
+gateway), and multi-recipient key wrapping, in the core and on the pages.

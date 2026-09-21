@@ -199,3 +199,72 @@ test("every local asset a page references exists and the gateway will serve it",
     "the gateway serves only STATIC_DIRECTORIES — see server/gateway.mjs"
   );
 });
+
+/**
+ * Every input the controller reads by id, against the page that has to carry
+ * it.
+ *
+ * This is the rename that breaks silently: `el(id)` returns null for an id that
+ * is not on the page, `selectedPassphrase()` and friends read "" from that, and
+ * the app carries on believing the user left the box empty — which for the
+ * sharing fields means uploading without the recipients someone listed, and for
+ * the passphrase means publishing in the clear.
+ */
+test("every input the controller reads exists on the page that needs it", () => {
+  const required = {
+    "upload.html": ["doc-file", "passphrase", "recipients", "cipher-suite"],
+    "retrieve.html": ["lookup-hash", "retrieve-passphrase", "retrieve-identity"],
+  };
+
+  const missing = [];
+  for (const [page, ids] of Object.entries(required)) {
+    const markup = withoutComments(read(page));
+    for (const id of ids) {
+      if (!new RegExp(`\\bid="${id}"`).test(markup)) missing.push(`${page}: #${id}`);
+    }
+  }
+  assert.deepEqual(missing, [], "the controller reads these by id and would silently see nothing");
+});
+
+test("every field holding a secret is a password field the browser will not autofill", () => {
+  // The identity is as secret as the passphrase — more so, since it opens every
+  // document ever sealed to it rather than one — so it gets the same treatment.
+  const secrets = {
+    "upload.html": ["passphrase"],
+    "retrieve.html": ["retrieve-passphrase", "retrieve-identity"],
+  };
+
+  const offenders = [];
+  for (const [page, ids] of Object.entries(secrets)) {
+    const markup = withoutComments(read(page));
+    for (const id of ids) {
+      const tag = markup.match(new RegExp(`<input\\b[^>]*\\bid="${id}"[^>]*>`));
+      if (!tag) {
+        offenders.push(`${page}: #${id} is not an <input>`);
+        continue;
+      }
+      if (!/\btype="password"/.test(tag[0])) offenders.push(`${page}: #${id} is not type=password`);
+      if (!/\bautocomplete="/.test(tag[0])) offenders.push(`${page}: #${id} has no autocomplete`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
+/**
+ * The share box takes public keys, so it must not be a password field — but it
+ * must also never be the place an identity ends up. The controller refuses one
+ * (see test/e2e/browser.test.js); this checks the page tells people so before
+ * they paste, since the mistake cannot be undone once a manifest is published.
+ */
+test("the share box says which half of the pair belongs in it", () => {
+  const markup = withoutComments(read("upload.html"));
+  const tag = markup.match(/<textarea\b[^>]*\bid="recipients"[^>]*>/);
+
+  assert.ok(tag, "the recipients box should be a textarea — a list goes in it");
+  assert.ok(!/\btype="password"/.test(tag[0]), "recipient keys are public");
+  assert.match(
+    markup,
+    /never an identity, which is the private half/,
+    "the page should warn against pasting the private half"
+  );
+});

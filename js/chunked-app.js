@@ -1,9 +1,10 @@
 /**
  * Browser controller for chunked upload and retrieval.
  *
- * All cryptography happens in this tab. Plaintext bytes, the passphrase and the
- * file key never leave the browser: what goes to the pinning service is already
- * encrypted, and what goes on-chain is two 32-byte hashes plus a manifest CID.
+ * All cryptography happens in this tab. Plaintext bytes, the passphrase, a
+ * recipient identity and the file key never leave the browser: what goes to the
+ * pinning service is already encrypted, and what goes on-chain is two 32-byte
+ * hashes plus a manifest CID.
  *
  * Loaded as an ES module, so the handlers are published onto `window` for the
  * inline onclick/onchange attributes the pages use.
@@ -19,6 +20,7 @@ import {
   restoreFile,
   sealManifest,
 } from "./core/manifest.js";
+import { parseIdentity, parseRecipient } from "./core/recipients.js";
 import { DEFAULT_SUITE, listSuites } from "./core/suites.js";
 import { html, safe, toHtml } from "./core/html.js";
 import { refusalAdvice } from "./core/refusals.js";
@@ -233,6 +235,54 @@ function selectedPassphrase(inputId = "passphrase") {
 }
 
 /**
+ * The recipient keys this upload should be readable by.
+ *
+ * Parsed here rather than left to packFile(), so a key with a typo in it is
+ * reported against the line it was pasted on instead of as one anonymous
+ * failure after the file has been read. parseRecipient() is also what catches
+ * somebody pasting their *identity* into this box, which would publish their
+ * private key inside a manifest anyone can fetch.
+ */
+function selectedRecipients(inputId = "recipients") {
+  const input = el(inputId);
+  const raw = input ? input.value : "";
+
+  // One per line is what the box asks for. A list pasted out of an email
+  // arrives comma- or space-separated about as often, and none of those
+  // characters can occur inside a key, whose encoding is base64url.
+  const keys = raw.split(/[\s,]+/).filter((key) => key.length > 0);
+  if (keys.length === 0) return null;
+
+  keys.forEach((key, i) => {
+    try {
+      parseRecipient(key);
+    } catch (error) {
+      throw new Error(`Recipient ${i + 1} of ${keys.length}: ${error.message}`);
+    }
+  });
+  return keys;
+}
+
+/**
+ * The identity to open a shared document with.
+ *
+ * Checked before anything is fetched: the alternative is discovering a
+ * mistyped key after downloading every chunk of a large document.
+ */
+function selectedIdentity(inputId = "retrieve-identity") {
+  const input = el(inputId);
+  const value = input ? input.value.trim() : "";
+  if (value.length === 0) return null;
+
+  try {
+    parseIdentity(value);
+  } catch (error) {
+    throw new Error(`Identity: ${error.message}`);
+  }
+  return value;
+}
+
+/**
  * Which path this upload takes to the chain.
  *
  * The page offers both; the default is the one that asks nothing of the user.
@@ -254,6 +304,7 @@ export async function uploadChunked() {
     const mode = anchorMode();
     const { file, bytes } = await readSelectedFile();
     const passphrase = selectedPassphrase();
+    const recipients = selectedRecipients();
     const suite = selectedSuite();
 
     if (storage.provider !== "pinata") {
@@ -268,23 +319,35 @@ export async function uploadChunked() {
     const account = mode === "wallet" ? currentAccount() : null;
     const contract = mode === "wallet" ? contractInstance() : null;
 
+    const sharedWith = recipients
+      ? ` and sealing it to ${recipients.length} recipient key${recipients.length === 1 ? "" : "s"}`
+      : "";
+
     if (passphrase) {
       say(
         `Deriving your key with ${describeKdf(cryptoConfig.kdf)}, then encrypting ` +
-          `${humanSize(bytes.length)} with ${suite}…`
+          `${humanSize(bytes.length)} with ${suite}${sharedWith}…`
       );
       // Derivation normally runs in a worker and leaves this thread free. The
       // yield only matters on the fallback path, where it lets the message
       // above paint before Argon2id takes the thread.
       await yieldToBrowser();
+    } else if (recipients) {
+      // No passphrase means no Argon2id, so this path has nothing slow to warn
+      // about — wrapping to a recipient key is a key agreement, not a stretch.
+      say(`Encrypting ${humanSize(bytes.length)} with ${suite}${sharedWith}…`);
     } else {
-      say(`Chunking ${humanSize(bytes.length)} (unencrypted — no passphrase given)…`);
+      say(
+        `Chunking ${humanSize(bytes.length)} ` +
+          "(unencrypted — no passphrase and no recipient keys given)…"
+      );
     }
 
     const packed = await packFile(bytes, {
       fileName: file.name,
       mimeType: file.type || "application/octet-stream",
       passphrase,
+      recipients,
       suite,
       chunkSize: cryptoConfig.chunkSize,
       kdf: cryptoConfig.kdf,
@@ -516,12 +579,7 @@ function renderReceipt({ packed, manifestCID, receipt, checked, pending }) {
   set("file-hash", html`<i class="fa-solid fa-hashtag mx-1"></i>${statement.fileHash}`);
   set("merkle-root", html`<i class="fa-solid fa-sitemap mx-1"></i>${statement.merkleRoot}`);
   set("manifest-cid", html`<i class="fa-solid fa-box mx-1"></i>${manifestCID}`);
-  set(
-    "chunk-summary",
-    html`<i class="fa-solid fa-layer-group mx-1"></i>${packed.totalChunks} chunks · ${humanSize(
-      packed.fileSize
-    )} · ${packed.encrypted ? packed.suite : "unencrypted"}`
-  );
+  set("chunk-summary", chunkSummary(packed));
   set("time-stamps", html`<i class="fa-solid fa-clock mx-1"></i>${statement.issuedAt}`);
 
   if (checked.valid) {
@@ -597,12 +655,7 @@ function renderUploadResult({ packed, manifestCID, receipt, explorer }) {
   set("file-hash", html`<i class="fa-solid fa-hashtag mx-1"></i>${packed.fileHashHex}`);
   set("merkle-root", html`<i class="fa-solid fa-sitemap mx-1"></i>${packed.merkleRootHex}`);
   set("manifest-cid", html`<i class="fa-solid fa-box mx-1"></i>${manifestCID}`);
-  set(
-    "chunk-summary",
-    html`<i class="fa-solid fa-layer-group mx-1"></i>${packed.totalChunks} chunks · ${humanSize(
-      packed.fileSize
-    )} · ${packed.encrypted ? packed.suite : "unencrypted"}`
-  );
+  set("chunk-summary", chunkSummary(packed));
   set("blockNumber", html`<i class="fa-solid fa-cube mx-1"></i>${receipt.blockNumber}`);
   set("time-stamps", html`<i class="fa-solid fa-clock mx-1"></i>${new Date().toISOString()}`);
 
@@ -618,6 +671,23 @@ function renderUploadResult({ packed, manifestCID, receipt, explorer }) {
   }
 
   renderShareQr(url);
+}
+
+/**
+ * The one line describing what was sealed, shown by both upload paths.
+ *
+ * Built in one place rather than two: the wallet path and the gateway-receipt
+ * path render the same summary into the same element, and while they were two
+ * copies of one template the recipient count was added to one of them and
+ * silently missing from the other.
+ */
+function chunkSummary(packed) {
+  const shared = packed.recipientCount
+    ? ` · shared with ${packed.recipientCount} recipient${packed.recipientCount === 1 ? "" : "s"}`
+    : "";
+  return html`<i class="fa-solid fa-layer-group mx-1"></i>${packed.totalChunks} chunks · ${humanSize(
+    packed.fileSize
+  )} · ${packed.encrypted ? packed.suite : "unencrypted"}${shared}`;
 }
 
 /** A scannable link straight to this document's retrieval page. */
@@ -659,6 +729,11 @@ export async function retrieveChunked() {
       throw new Error("Enter the document's 0x-prefixed 64-character file hash.");
     }
 
+    // Read before the first request: a mistyped identity should be reported
+    // now, not after every chunk of a large document has been downloaded.
+    const identity = selectedIdentity();
+    const passphrase = selectedPassphrase("retrieve-passphrase");
+
     const { contract: contractConfig, storage } = config();
     const contract = contractInstance();
 
@@ -698,16 +773,35 @@ export async function retrieveChunked() {
       );
     }
 
-    const passphrase = selectedPassphrase("retrieve-passphrase");
-    if (manifest.encrypted && !passphrase) {
-      throw new Error("This document is encrypted. Enter its passphrase.");
+    // Which routes to the file key this particular document offers. A manifest
+    // may carry either or both, so what to ask the user for is a property of
+    // the document rather than a fixed prompt.
+    const offersRecipients = Boolean(manifest.recipients);
+    const offersPassphrase = Boolean(manifest.wrappedKey);
+
+    // The identity is preferred where the document supports it: it is a key
+    // agreement rather than an Argon2id stretch, so it is the faster way in for
+    // someone who filled both boxes.
+    const useIdentity = manifest.encrypted && offersRecipients && Boolean(identity);
+    const usePassphrase =
+      manifest.encrypted && !useIdentity && offersPassphrase && Boolean(passphrase);
+
+    if (manifest.encrypted && !useIdentity && !usePassphrase) {
+      throw new Error(needsToOpen(offersPassphrase, offersRecipients));
     }
 
-    if (manifest.encrypted) {
+    if (usePassphrase) {
       say(`Deriving your key with ${describeKdf(manifest.kdf)}…`);
       await yieldToBrowser();
+    } else if (useIdentity) {
+      say("Unwrapping the file key with your identity…");
     }
-    const opened = await openManifest(manifest, passphrase);
+
+    const opened = await openManifest(
+      manifest,
+      usePassphrase ? passphrase : null,
+      useIdentity ? { identity } : {}
+    );
 
     say(`Fetching and verifying ${manifest.totalChunks} chunks…`);
     const restored = await restoreFile(
@@ -735,6 +829,23 @@ export async function retrieveChunked() {
   } finally {
     busy(false);
   }
+}
+
+/**
+ * What this document needs before it will open, in the user's terms.
+ *
+ * Asking for a passphrase on a document sealed only to recipient keys sends
+ * someone hunting for a secret that was never created; asking for an identity
+ * on a passphrase-sealed one is as unhelpful the other way round.
+ */
+function needsToOpen(offersPassphrase, offersRecipients) {
+  if (offersPassphrase && offersRecipients) {
+    return "This document is encrypted. Enter its passphrase, or your identity if it was shared with you.";
+  }
+  if (offersRecipients) {
+    return "This document was shared to recipient keys. Enter your identity to open it.";
+  }
+  return "This document is encrypted. Enter its passphrase.";
 }
 
 function renderRetrieveStatus(onChain, fileHash, explorer) {

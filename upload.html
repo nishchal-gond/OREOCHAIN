@@ -142,6 +142,30 @@
             autocomplete="new-password"
             placeholder="Cannot be recovered if lost"
           />
+          <p class="form-text">
+            With recipient keys below, a passphrase is optional — it keeps you a
+            way in that does not depend on still holding a device. With neither,
+            the document is published unencrypted.
+          </p>
+
+          <label class="form-label mt-3" for="recipients">
+            Share with
+            <span class="text-muted">(optional — one recipient key per line)</span>
+          </label>
+          <textarea
+            id="recipients"
+            class="form-control"
+            rows="3"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="oreo-recipient-v1:…"
+          ></textarea>
+          <p class="form-text">
+            Everyone listed opens the document with their own key, without being
+            told the passphrase. Paste the <strong>recipient</strong> key someone
+            published — never an identity, which is the private half. Generate a
+            pair with <code>npm run recipient-key</code>.
+          </p>
 
           <label class="form-label mt-3" for="cipher-suite">Cipher suite</label>
           <select id="cipher-suite" class="form-select"></select>

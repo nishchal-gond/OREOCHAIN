@@ -28,6 +28,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { generateIdentity } from "../../js/core/recipients.js";
 import { anchorPending, loadPlaywright, openApp } from "./harness.mjs";
 import { loadToolchain } from "./chain.mjs";
 
@@ -95,10 +96,20 @@ async function open(url, options = {}) {
  * one — the user sends registerDocument() themselves — and "gateway" is what
  * someone gets who touches nothing.
  */
-async function upload({ page, file, passphrase = PASSPHRASE, suite, mode = "wallet" }) {
+async function upload({
+  page,
+  file,
+  passphrase = PASSPHRASE,
+  recipients = null,
+  suite,
+  mode = "wallet",
+}) {
   await page.waitForFunction(() => typeof window.uploadChunked === "function", { timeout: 30_000 });
   await page.setInputFiles("#doc-file", file);
   if (passphrase !== null) await page.fill("#passphrase", passphrase);
+  // One per line, which is what the box asks for and what someone pasting a
+  // list of keys out of an email produces.
+  if (recipients) await page.fill("#recipients", recipients.join("\n"));
   if (suite) await page.selectOption("#cipher-suite", suite);
   if (mode === "wallet") await page.check("#anchor-wallet");
 
@@ -629,3 +640,203 @@ test(
     assert.deepEqual(problems, []);
   }
 );
+
+// ---------------------------------------------------------------------------
+// Sharing to a recipient key
+// ---------------------------------------------------------------------------
+
+/**
+ * The whole point of recipient keys, walked end to end in a browser: nobody is
+ * told a passphrase, and the person it was shared with opens it anyway.
+ */
+test("a document shared to a recipient key opens for them, with no passphrase", { skip: missing }, async () => {
+  const alice = await generateIdentity();
+  const { file, bytes } = await sampleFile("board-pack.pdf");
+
+  const uploader = await open("/upload.html");
+  const result = await upload({
+    page: uploader.page,
+    file,
+    passphrase: null,
+    recipients: [alice.recipient],
+  });
+
+  assert.match(result.note, /Registered on-chain/);
+  assert.match(
+    result.summary,
+    /shared with 1 recipient/,
+    "the page should confirm who the document was sealed to"
+  );
+  // Sealed to a key, not published in the clear — the distinction the summary
+  // line has to get right, since it is all the user sees.
+  assert.match(result.summary, /aes-256-gcm/);
+  assert.deepEqual(uploader.problems, []);
+
+  const reader = await open(new URL(result.shareUrl).pathname + new URL(result.shareUrl).search);
+  const { page } = reader;
+  await page.waitForFunction(() => typeof window.retrieveChunked === "function", { timeout: 30_000 });
+
+  // The passphrase box is left empty: there is no passphrase for this document.
+  await page.fill("#retrieve-identity", alice.identity);
+  await page.click("#chunked-retrieve-button");
+  const note = await waitForNote(page, /Verified/);
+
+  assert.match(note, /Every one of 4 chunks matched the root anchored on-chain/);
+
+  const link = page.locator("#download-document");
+  assert.ok(await link.isVisible(), "a document opened with an identity should offer a download");
+
+  const [download] = await Promise.all([page.waitForEvent("download"), link.click()]);
+  const saved = path.join(workspace, "shared.bin");
+  await download.saveAs(saved);
+  assert.ok(
+    fs.readFileSync(saved).equals(bytes),
+    "the file opened with a recipient identity should be byte-identical to the original"
+  );
+  assert.deepEqual(reader.problems, []);
+});
+
+test("a document sealed to someone else does not open with your identity", { skip: missing }, async () => {
+  const alice = await generateIdentity();
+  const mallory = await generateIdentity();
+  const { file } = await sampleFile("not-for-you.pdf");
+
+  const uploader = await open("/upload.html");
+  const result = await upload({
+    page: uploader.page,
+    file,
+    passphrase: null,
+    recipients: [alice.recipient],
+  });
+
+  const reader = await open(new URL(result.shareUrl).pathname + new URL(result.shareUrl).search);
+  const { page } = reader;
+  await page.waitForFunction(() => typeof window.retrieveChunked === "function", { timeout: 30_000 });
+
+  await page.fill("#retrieve-identity", mallory.identity);
+  await page.click("#chunked-retrieve-button");
+  const note = await waitForNote(page, /not shared with your key/);
+
+  assert.match(note, /not shared with your key/);
+  assert.ok(
+    !(await page.locator("#download-document").isVisible()),
+    "a document that would not open must offer nothing to download"
+  );
+});
+
+test("a document sealed both ways opens by passphrase and by identity alike", { skip: missing }, async () => {
+  const alice = await generateIdentity();
+  const { file, bytes } = await sampleFile("minutes.pdf");
+
+  const uploader = await open("/upload.html");
+  const result = await upload({
+    page: uploader.page,
+    file,
+    passphrase: PASSPHRASE,
+    recipients: [alice.recipient],
+  });
+  assert.match(result.summary, /shared with 1 recipient/);
+
+  const path_ = new URL(result.shareUrl).pathname + new URL(result.shareUrl).search;
+
+  for (const [label, fill] of [
+    ["passphrase", (page) => page.fill("#retrieve-passphrase", PASSPHRASE)],
+    ["identity", (page) => page.fill("#retrieve-identity", alice.identity)],
+  ]) {
+    const reader = await open(path_);
+    const { page } = reader;
+    await page.waitForFunction(() => typeof window.retrieveChunked === "function", {
+      timeout: 30_000,
+    });
+
+    await fill(page);
+    await page.click("#chunked-retrieve-button");
+    const note = await waitForNote(page, /Verified/);
+    assert.match(note, /Verified/, `the ${label} should have opened this document`);
+
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.locator("#download-document").click(),
+    ]);
+    const saved = path.join(workspace, `both-${label}.bin`);
+    await download.saveAs(saved);
+    assert.ok(
+      fs.readFileSync(saved).equals(bytes),
+      `the bytes recovered via the ${label} should match the original`
+    );
+  }
+});
+
+test("a document shared to recipients asks for an identity, not a passphrase", { skip: missing }, async () => {
+  const alice = await generateIdentity();
+  const { file } = await sampleFile("ask-right.pdf");
+
+  const uploader = await open("/upload.html");
+  const result = await upload({
+    page: uploader.page,
+    file,
+    passphrase: null,
+    recipients: [alice.recipient],
+  });
+
+  const reader = await open(new URL(result.shareUrl).pathname + new URL(result.shareUrl).search);
+  const { page } = reader;
+  await page.waitForFunction(() => typeof window.retrieveChunked === "function", { timeout: 30_000 });
+
+  // Nothing filled in. Asking for a passphrase here would send someone hunting
+  // for a secret that was never created.
+  await page.click("#chunked-retrieve-button");
+  const note = await waitForNote(page, /Enter your identity/);
+
+  assert.match(note, /shared to recipient keys/);
+  assert.match(note, /Enter your identity/);
+});
+
+/**
+ * The unrecoverable mistake. An identity pasted into the "share with" box would
+ * be a private key published inside a manifest anyone can fetch, retroactively
+ * opening every document ever sealed to it. It has to be refused before a
+ * single byte is uploaded.
+ */
+test("pasting your identity into the share box is refused before anything is uploaded", { skip: missing }, async () => {
+  const alice = await generateIdentity();
+  const { file } = await sampleFile("oops.pdf");
+
+  const { page } = await open("/upload.html");
+  await page.waitForFunction(() => typeof window.uploadChunked === "function", { timeout: 30_000 });
+
+  await page.setInputFiles("#doc-file", file);
+  await page.fill("#recipients", alice.identity);
+  await page.click("#chunked-upload-button");
+
+  const note = await waitForNote(page, /private identity/);
+  assert.match(note, /that is a private identity, not a recipient key/);
+  assert.match(note, /Recipient 1 of 1/, "the offending line should be named");
+
+  // `problems` is deliberately not asserted here, as it is on the success
+  // paths: refusing this logs the error to the console, which is what the
+  // console is for.
+  assert.ok(
+    !(await page.locator(".transaction-status").isVisible()),
+    "nothing should have been uploaded or registered"
+  );
+});
+
+test("a mistyped recipient key names the line it is on", { skip: missing }, async () => {
+  const alice = await generateIdentity();
+  const bob = await generateIdentity();
+  const { file } = await sampleFile("typo.pdf");
+
+  const { page } = await open("/upload.html");
+  await page.waitForFunction(() => typeof window.uploadChunked === "function", { timeout: 30_000 });
+
+  await page.setInputFiles("#doc-file", file);
+  await page.fill(
+    "#recipients",
+    [alice.recipient, `${bob.recipient.slice(0, -4)}`, bob.recipient].join("\n")
+  );
+  await page.click("#chunked-upload-button");
+
+  const note = await waitForNote(page, /Recipient 2 of 3/);
+  assert.match(note, /Recipient 2 of 3/);
+});

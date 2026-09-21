@@ -152,8 +152,9 @@ function decode(text, prefix, expectedBytes, what) {
     if (trimmed.startsWith(other)) {
       throw new Error(
         prefix === RECIPIENT_PREFIX
-          ? "that is a private identity, not a recipient key — seal to the " +
-            "recipient key from `recipientOf()`, and never put an identity in a manifest"
+          ? "that is a private identity, not a recipient key — share the " +
+            "recipient key that was generated alongside it, and never put an " +
+            "identity anywhere it would end up in a manifest"
           : "that is a public recipient key, not an identity — opening a file needs the private half"
       );
     }

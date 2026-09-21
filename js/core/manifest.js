@@ -260,6 +260,8 @@ export async function packFile(fileBytes, options = {}) {
   return {
     encrypted,
     suite: encrypted ? suite : null,
+    /** How many recipient keys this file will be sealed to. */
+    recipientCount: byRecipient ? recipients.length : 0,
     fileName,
     mimeType,
     fileSize: fileBytes.length,
