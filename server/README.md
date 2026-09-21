@@ -32,8 +32,13 @@ adds the things only a server can enforce:
 # Generate an API key for a client
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
+# And the key that signs receipts. The gateway will not start without one,
+# because a throwaway key would disown every receipt at the next restart.
+node scripts/generate-receipt-key.mjs
+
 PINATA_JWT="your-pinata-jwt" \
 OREOCHAIN_API_KEYS="the-key-you-just-generated" \
+OREOCHAIN_RECEIPT_KEY='{"privateJwk":…,"publicJwk":…}' \
 npm start
 ```
 
@@ -41,12 +46,20 @@ For local development with no pinning account, `OREOCHAIN_STORAGE=memory` keeps
 everything in process memory:
 
 ```bash
-OREOCHAIN_STORAGE=memory OREOCHAIN_API_KEYS="$(node -e "console.log('k'.repeat(48))")" npm start
+OREOCHAIN_STORAGE=memory OREOCHAIN_EPHEMERAL_RECEIPT_KEY=true \
+  OREOCHAIN_API_KEYS="$(node -e "console.log('k'.repeat(48))")" npm start
 ```
 
+`OREOCHAIN_EPHEMERAL_RECEIPT_KEY` signs with a throwaway key so there is
+nothing to generate first, and the log says so every time it signs that way.
+It is for development only: every restart invalidates every receipt issued
+before it, and a holder cannot tell that from a forgery. `npm run dev` sets it
+too, along with the in-memory store, static file serving and anonymous access.
+In a deployment, generate a key.
+
 The process refuses to start if it is misconfigured — no API keys, no pinning
-credential, a wildcard CORS origin — rather than running in a state you did not
-intend.
+credential, no receipt key, a wildcard CORS origin — rather than running in a
+state you did not intend.
 
 **A deployment is two processes.** This one issues receipts promising that a
 document will be anchored; [the anchoring worker](#the-anchoring-worker) is
