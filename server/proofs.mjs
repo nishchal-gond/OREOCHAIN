@@ -157,7 +157,18 @@ export async function createProofService(options = {}) {
        * normalizeDocument() strips any the client sent, because a receipt
        * whose "verified" came from the party being verified is worth nothing.
        */
-      if (verifier) await verifier.verify(anchorable);
+      if (verifier) {
+        const { manifest } = await verifier.verify(anchorable);
+
+        /*
+         * From the header the verifier just read and validated, never from
+         * the request. Without a verifier they stay undefined and the
+         * statement simply does not carry them, which is the honest answer:
+         * this gateway did not look.
+         */
+        anchorable.encrypted = Boolean(manifest.encrypted);
+        anchorable.suite = manifest.encrypted ? manifest.suite || null : null;
+      }
       anchorable.verified = Boolean(verifier);
 
       const receipt = await issueReceipt(anchorable, privateKey, { issuer, kid });
@@ -362,10 +373,27 @@ function normalizeDocument(document) {
 
   const lower = (value) => (typeof value === "string" ? value.toLowerCase() : value);
 
-  // `verified` is this service's own assertion about the document, so a value
-  // arriving from the client is discarded rather than trusted. Everything else
-  // is the client's to state and is checked elsewhere.
-  const { verified: _clientClaimedVerified, ...claimed } = document;
+  /*
+   * Three fields the client does not get to state.
+   *
+   * `verified` is this service's own assertion about the document, so a value
+   * arriving from the party being verified is worth nothing.
+   *
+   * `encrypted` and `suite` for the same reason once removed: a receipt
+   * marked `verified: true` says the gateway checked this document, and these
+   * rode along unchecked inside that sentence. A client could post
+   * `suite: "totally-made-up-v9"` for a document whose manifest says
+   * aes-256-gcm and get it signed; the honest direction was just as wrong,
+   * since omitting them had an encrypted file receipted as `encrypted: false`.
+   * They come from the manifest header the gateway already reads, in record(),
+   * or they are left out of the statement entirely.
+   */
+  const {
+    verified: _clientClaimedVerified,
+    encrypted: _clientClaimedEncrypted,
+    suite: _clientClaimedSuite,
+    ...claimed
+  } = document;
 
   const normalized = {
     ...claimed,

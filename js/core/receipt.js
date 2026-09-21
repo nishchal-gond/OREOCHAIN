@@ -103,8 +103,20 @@ export async function issueReceipt(document, privateKey, options = {}) {
     manifestCID: document.manifestCID,
     fileSize: document.fileSize,
     totalChunks: document.totalChunks,
-    encrypted: Boolean(document.encrypted),
-    suite: document.suite || null,
+    /*
+     * Undefined rather than coerced, so a caller that cannot assert these
+     * leaves them out. canonicalize() drops undefined keys, so an omitted
+     * field reads as "not asserted" rather than as false or null — the same
+     * additive rule `verified` below already relies on, and the reason a
+     * receipt issued before either existed still verifies.
+     *
+     * They describe the stored document, not the request, so the issuer is
+     * expected to take them from the manifest it read. Coercing them here
+     * meant a caller who said nothing was recorded as having said
+     * "unencrypted", over a signature.
+     */
+    encrypted: document.encrypted === undefined ? undefined : Boolean(document.encrypted),
+    suite: document.suite === undefined ? undefined : document.suite || null,
 
     /*
      * Whether the issuer checked this document against its manifest before
