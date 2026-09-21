@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 import { assertSafeConfig, loadConfig } from "./config.mjs";
 import { createBackend } from "./storage.mjs";
 import { createHandler } from "./gateway.mjs";
+import { createAnchorConfirmer } from "./confirm.mjs";
+import { createChainReader } from "./chain.mjs";
 import { createLogger } from "./log.mjs";
 import { createProofService, readSigningKey } from "./proofs.mjs";
 import { createManifestVerifier } from "./verify.mjs";
@@ -122,6 +124,26 @@ async function main() {
   }
 
   /*
+   * Read-only chain access, so the public verification endpoint can confirm
+   * an anchor rather than telling a verifier to go and read a blockchain.
+   * Optional: without it the endpoint says it cannot check, which is the one
+   * answer that is never wrong.
+   */
+  let confirmer = null;
+  if (config.chainRpc) {
+    const reader = await createChainReader({
+      rpcUrl: config.chainRpc,
+      contractAddress: config.contractAddress,
+      log,
+    });
+    confirmer = createAnchorConfirmer({ reader, log, ttlMs: config.chainCacheMs });
+    log.info("chain verification enabled", {
+      contract: config.contractAddress,
+      cacheMs: config.chainCacheMs,
+    });
+  }
+
+  /*
    * Flipped on SIGTERM so /ready starts answering 503 while in-flight requests
    * finish. An orchestrator stops routing to this instance before the drain,
    * rather than sending it requests it is about to stop answering.
@@ -133,6 +155,7 @@ async function main() {
     proofs,
     logger: log,
     readiness,
+    confirmer,
   });
 
   const server = http.createServer((req, res) => {
