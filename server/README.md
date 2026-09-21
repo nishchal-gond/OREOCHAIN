@@ -251,6 +251,19 @@ previously issued receipt still verifies. `OREOCHAIN_VERIFY_MANIFESTS=false`
 turns the check off and the process warns at startup; receipts then say
 `"verified": false`.
 
+`encrypted` and `suite` are read from the manifest header too. The shipped
+client still sends them and a gateway still accepts them, but the values are
+discarded and the manifest's are signed instead. They sit inside a statement
+stamped `"verified": true`, so a reader takes them as checked — but they used
+to be whatever the uploader typed. A client could post `"suite": "made-up-v9"` for a
+document whose manifest says `aes-256-gcm` and have it signed, and the honest
+direction was just as wrong: a client that omitted `encrypted` had a sealed
+document receipted as `"encrypted": false`. With no verifier configured neither
+field appears in the statement at all, which is the honest answer — this
+gateway did not look — where `false` and `null` would be assertions it cannot
+make. They are additive on the same terms as `verified`, so receipts already in
+users' hands still verify.
+
 **What this does not prove:** that the manifest's Merkle root is genuinely the
 root of the chunks it lists. That would mean fetching and hashing the whole
 file on every upload to re-derive what the client already computed. A client
