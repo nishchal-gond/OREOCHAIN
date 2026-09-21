@@ -24,7 +24,12 @@ import { refusalAdvice } from "./core/refusals.js";
 import { exportReceipt } from "./core/receipt.js";
 import { createAdapterFromConfig, putAll } from "./storage/ipfs.js";
 import { verifyInBatch } from "./core/anchor.js";
-import { checkAnchor, checkReceipt, createProofClient } from "./storage/proofs.js";
+import {
+  checkAnchor,
+  checkReceipt,
+  checkVerifyResponse,
+  createProofClient,
+} from "./storage/proofs.js";
 import { CHUNKED_VERIFICATION_ABI } from "./contract-abi.js";
 
 const DEFAULTS = {
@@ -796,6 +801,19 @@ export async function verifyRegistration() {
     }
 
     const { contract: contractConfig } = config();
+
+    /*
+     * No wallet and no rpcUrl: there is no chain to read, and
+     * contractInstance() would throw before anything useful happened. Ask the
+     * gateway for its materials instead and report exactly how far they get,
+     * which is short of a verification and says so.
+     */
+    if (!globalThis.web3) {
+      const offline = await verifyWithoutChain(createProofClient(), fileHash);
+      if (offline) return offline;
+      return notRegistered(fileHash);
+    }
+
     const record = await contractInstance().methods.findDocument(fileHash).call();
     const blockNumber = Number(record.blockNumber ?? record[0]);
 
@@ -813,18 +831,7 @@ export async function verifyRegistration() {
       const batched = await verifyViaBatch(fileHash);
       if (batched) return batched;
 
-      renderRetrieveStatus(null);
-      const status = document.querySelector(".transaction-status");
-      if (status) status.classList.remove("d-none");
-      const label = el("doc-status");
-      if (label) {
-        label.innerHTML =
-          '<h3 class="text-danger">Not registered <i class="fa fa-times-circle"></i></h3>';
-      }
-      const hashField = el("file-hash");
-      if (hashField) hashField.innerHTML = `<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`;
-      say("This file does not match any registered document.", "danger");
-      return { registered: false, fileHash };
+      return notRegistered(fileHash);
     }
 
     renderRetrieveStatus(
@@ -868,9 +875,18 @@ export async function verifyRegistration() {
 async function verifyViaBatch(fileHash) {
   const { contract: contractConfig } = config();
 
+  const client = createProofClient();
+
+  /*
+   * With no way to reach the chain there is nothing to check a root against,
+   * so the page asks the gateway for everything it has and reports exactly
+   * how far that gets — which is short of proof, and says so.
+   */
+  if (!globalThis.web3) return verifyWithoutChain(client, fileHash);
+
   let inclusion;
   try {
-    inclusion = await createProofClient().inclusion(fileHash);
+    inclusion = await client.inclusion(fileHash);
   } catch (error) {
     // The gateway being unreachable is not evidence of anything about the
     // document, so it must not turn into a verdict either way.
@@ -950,6 +966,126 @@ export function anchorModeChanged() {
   if (typeof window.oreochainRefreshChainNotice === "function") {
     window.oreochainRefreshChainNotice();
   }
+}
+
+/**
+ * The plainest answer there is: nothing anywhere knows this document.
+ *
+ * Shared by both paths on purpose. A fallback that softens "no" into "could
+ * not say" would be worse than having no fallback at all, so there is one
+ * rendering of it and every path ends at the same one.
+ */
+function notRegistered(fileHash) {
+  renderRetrieveStatus(null);
+  const status = document.querySelector(".transaction-status");
+  if (status) status.classList.remove("d-none");
+  const label = el("doc-status");
+  if (label) {
+    label.innerHTML =
+      '<h3 class="text-danger">Not registered <i class="fa fa-times-circle"></i></h3>';
+  }
+  const hashField = el("file-hash");
+  if (hashField) hashField.innerHTML = `<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`;
+  say("This file does not match any registered document.", "danger");
+  return { registered: false, fileHash };
+}
+
+/**
+ * What can be said about a document when this page cannot read the chain.
+ *
+ * Less than the page would like, and the wording has to carry that. The
+ * signature and the Merkle path are checked here, in this tab, and they
+ * settle that the service signed for this exact document and that its own
+ * records agree with themselves. They do not settle that anything was
+ * anchored: the root came from the service too.
+ *
+ * So this never renders as verified, whatever `gatewayClaim` says. It names
+ * what was checked, names what was not, and hands over the transaction to
+ * look at — which is a useful answer, and an honest one.
+ */
+async function verifyWithoutChain(client, fileHash) {
+  let body;
+  try {
+    body = await client.verify(fileHash);
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+
+  const checked = await checkVerifyResponse(body, client);
+  const status = checked.gatewayStatus;
+
+  // No record anywhere is the caller's own "not registered" answer, not ours.
+  if (status === "unknown" || (!body.receipt && !body.batch)) return null;
+
+  const panel = document.querySelector(".transaction-status");
+  if (panel) panel.classList.remove("d-none");
+  const set = (id, html) => {
+    const node = el(id);
+    if (node) node.innerHTML = html;
+  };
+  set("file-hash", `<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`);
+
+  const hint =
+    "This page has no read-only RPC endpoint configured, so it cannot check the chain " +
+    "itself. Set <code>contract.rpcUrl</code> in <code>js/config.js</code> to get a full " +
+    "verification here.";
+
+  // A chain the gateway could not reach says nothing about the document, and
+  // must never be shown as a document that failed to verify.
+  if (status === "unavailable") {
+    set("doc-status", '<h3 class="text-warning">Could not check <i class="fa fa-clock"></i></h3>');
+    say(
+      `The service could not reach the chain just now, so nothing is confirmed either way. ${hint}`,
+      "warning"
+    );
+    return { registered: null, fileHash, checked };
+  }
+
+  const signatureOk = checked.receipt ? checked.receipt.valid : null;
+  const pathOk = checked.inclusion ? checked.inclusion.valid : null;
+
+  if (signatureOk === false && checked.receipt.forged) {
+    set("doc-status", '<h3 class="text-danger">Not from this service <i class="fa fa-times-circle"></i></h3>');
+    say(checked.receipt.reason, "danger");
+    return { registered: false, fileHash, checked };
+  }
+  if (pathOk === false || checked.consistent === false) {
+    set("doc-status", '<h3 class="text-danger">Does not check out <i class="fa fa-times-circle"></i></h3>');
+    say(
+      `The service's own records disagree about this document: ${
+        checked.warnings[0] || (checked.inclusion && checked.inclusion.reason) || "unknown reason"
+      }`,
+      "danger"
+    );
+    return { registered: false, fileHash, checked };
+  }
+
+  if (checked.anchor) {
+    set(
+      "exporter-address",
+      `<i class="fa-solid fa-link mx-1"></i><a target="_blank" rel="noopener" ` +
+        `href="${config().contract.explorer}/tx/${checked.anchor.txHash}">${checked.anchor.txHash}</a>`
+    );
+    set("blockNumber", `<i class="fa-solid fa-cube mx-1"></i>${checked.anchor.block ?? "—"}`);
+  }
+  if (body.batch) {
+    set("merkle-root", `<i class="fa-solid fa-sitemap mx-1"></i>${body.batch.document.merkleRoot}`);
+    set("manifest-cid", `<i class="fa-solid fa-box mx-1"></i>${body.batch.document.manifestCID}`);
+  }
+
+  set("doc-status", '<h3 class="text-warning">Partly checked <i class="fa fa-circle-half-stroke"></i></h3>');
+  const anchored =
+    checked.anchor !== null
+      ? `The service says it is anchored in the transaction above; this page did not confirm that.`
+      : `The service does not claim it is anchored on-chain yet.`;
+  say(
+    `Checked here: the service signed for this exact file, and its inclusion proof is ` +
+      `internally consistent. Not checked here: whether that batch is on the chain. ` +
+      `${anchored} ${hint}`,
+    "warning"
+  );
+  return { registered: null, anchored: null, fileHash, checked };
 }
 
 /** Hash the selected file locally so the user can look up their own document. */
