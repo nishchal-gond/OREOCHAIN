@@ -552,18 +552,41 @@ export function createHandler(config, backend, deps = {}) {
      * conclusion sits in one clearly named field that a caller is free to
      * ignore and redo.
      */
+    /**
+     * The public key that signed this particular receipt, served alongside it.
+     *
+     * The caller needs it to check the signature, and telling them to go and
+     * fetch it themselves is one more round trip on the one route whose whole
+     * purpose is to hand someone everything they need in a single answer. It
+     * is the key the receipt names by `kid`, not the current one, so a receipt
+     * issued before a rotation comes back with the key that will verify it.
+     *
+     * A kid the ring has never held returns `publicJwk: null` rather than
+     * nothing: that is a fact about this gateway — it never signed with that
+     * key — and a caller should be able to tell it apart from a field this
+     * response did not carry. It is not a verdict on the receipt; the caller
+     * still checks the signature, which is the point of serving the key.
+     */
+    const receiptKeyFor = (receipt) => {
+      const kid = receipt?.statement?.kid;
+      if (!kid) return undefined; // receipts issued before kids existed
+      return proofs.publicKeyFor(kid) || { kid, publicJwk: null, retiredAt: null };
+    };
+
     const answer = (httpStatus, claim, materials = {}) => ({
       status: claim.status,
       httpStatus,
       body: {
         fileHash,
         ...materials,
+        ...(materials.receipt ? { receiptKey: receiptKeyFor(materials.receipt) } : {}),
         gatewayClaim: claim,
         howToCheck:
-          "Do not take gatewayClaim on trust. Verify the receipt's signature against the " +
-          "key at GET /api/proofs/key, recompute the inclusion proof against batch.root, " +
-          "and read findBatch(batch.root) or findDocument(fileHash) on the contract named " +
-          "in chainRead.",
+          "Do not take gatewayClaim on trust. Verify the receipt's signature against " +
+          "receiptKey.publicJwk — the key this receipt names, served here so you do not " +
+          "have to fetch it, and checkable against GET /api/proofs/key?kid= — recompute " +
+          "the inclusion proof against batch.root, and read findBatch(batch.root) or " +
+          "findDocument(fileHash) on the contract named in chainRead.",
       },
     });
 

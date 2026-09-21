@@ -26,11 +26,21 @@ const KIB = 1024;
  */
 export function readSecret(env, name) {
   const fromFile = env[`${name}_FILE`];
-  if (!fromFile) return env[name] || null;
+  // An empty string is not a credential, and is deliberately treated as unset
+  // in both directions. docker-compose.yml is why: .env.example ships
+  // `PINATA_JWT=` and `OREOCHAIN_RECEIPT_KEY=` as empty lines for an operator
+  // to fill in, and the documented deployment leaves them empty and mounts the
+  // secrets as files instead — so every compose deployment has the base name
+  // and its _FILE twin present at once. Tightening either test below to
+  // `name in env` would refuse to start every one of them.
+  const direct = env[name] || null;
+  if (!fromFile) return direct;
 
   // Checked before the read, so the ambiguity is reported even when the file
-  // is also unreadable — that is the more useful of the two errors.
-  if (env[name]) {
+  // is also unreadable — that is the more useful of the two errors. An
+  // operator who fills the line in *and* keeps the mount gets this: it is a
+  // real ambiguity, and guessing which one they meant is worse than asking.
+  if (direct) {
     throw new Error(
       `both ${name} and ${name}_FILE are set — remove one, rather than leaving it ambiguous ` +
         "which credential is in use"

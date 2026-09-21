@@ -16,7 +16,7 @@ import path from "node:path";
 
 import { createLogger, LEVELS, _internals as logInternals } from "../server/log.mjs";
 import { createMetrics } from "../server/metrics.mjs";
-import { loadConfig, assertSafeConfig } from "../server/config.mjs";
+import { loadConfig, assertSafeConfig, readSecret } from "../server/config.mjs";
 import { readSigningKey } from "../server/proofs.mjs";
 import { _internals as gatewayInternals } from "../server/gateway.mjs";
 
@@ -303,6 +303,34 @@ test("setting both the value and its file is refused rather than guessed", () =>
       }),
     /remove one/
   );
+});
+
+test("an empty value beside a secret file is not 'both are set'", () => {
+  /*
+   * This is load-bearing for the documented deployment, not a nicety.
+   * .env.example ships `PINATA_JWT=` and `OREOCHAIN_RECEIPT_KEY=` as empty
+   * lines to fill in, and docker-compose.yml leaves them empty and mounts the
+   * credentials as files — so every compose deployment reaches readSecret()
+   * with the base name *and* its _FILE twin present. The refusal above must
+   * not fire on it. Tightening either test to `name in env` would refuse to
+   * start every compose deployment, and only a container would say so.
+   */
+  const file = path.join(tempDir(), "mounted");
+  writeFileSync(file, "from-the-file");
+
+  const config = loadConfig({
+    OREOCHAIN_ALLOW_ANONYMOUS: "true",
+    PINATA_JWT: "",
+    PINATA_JWT_FILE: file,
+  });
+  assert.equal(config.pinataJwt, "from-the-file");
+});
+
+test("an empty value with no file is no credential at all", () => {
+  // The other direction of the same rule: an empty line in .env is a line
+  // waiting to be filled in, not a credential of zero length.
+  assert.equal(readSecret({ PINATA_JWT: "" }, "PINATA_JWT"), null);
+  assert.equal(readSecret({}, "PINATA_JWT"), null);
 });
 
 test("a mistyped log level fails at startup rather than silencing the service", () => {

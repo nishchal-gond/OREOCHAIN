@@ -32,21 +32,36 @@ adds the things only a server can enforce:
 # Generate an API key for a client
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
+# And the key that signs receipts. This one is required: see below.
+node scripts/generate-receipt-key.mjs
+
 PINATA_JWT="your-pinata-jwt" \
 OREOCHAIN_API_KEYS="the-key-you-just-generated" \
+OREOCHAIN_RECEIPT_KEY="the-key-pair-you-just-generated" \
 npm start
 ```
 
+The receipt key is not optional. Without it the gateway refuses to start,
+because signing receipts with a throwaway key means every restart disowns every
+receipt already issued, and the holder of one cannot tell that from a forgery.
+Generate it once and keep it: rotating it is supported (see
+[Rotating the receipt key](#rotating-the-receipt-key)), losing it is not.
+
 For local development with no pinning account, `OREOCHAIN_STORAGE=memory` keeps
-everything in process memory:
+everything in process memory, and `OREOCHAIN_EPHEMERAL_RECEIPT_KEY` opts into
+the throwaway key the refusal above is about — which is what `npm run dev`
+does:
 
 ```bash
-OREOCHAIN_STORAGE=memory OREOCHAIN_API_KEYS="$(node -e "console.log('k'.repeat(48))")" npm start
+OREOCHAIN_STORAGE=memory \
+OREOCHAIN_EPHEMERAL_RECEIPT_KEY=true \
+OREOCHAIN_API_KEYS="$(node -e "console.log('k'.repeat(48))")" \
+npm start
 ```
 
 The process refuses to start if it is misconfigured — no API keys, no pinning
-credential, a wildcard CORS origin — rather than running in a state you did not
-intend.
+credential, no receipt key, a wildcard CORS origin — rather than running in a
+state you did not intend.
 
 **A deployment is two processes.** This one issues receipts promising that a
 document will be anchored; [the anchoring worker](#the-anchoring-worker) is
