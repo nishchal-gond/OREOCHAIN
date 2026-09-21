@@ -119,6 +119,39 @@ export function confirmed(argv = process.argv) {
   return argv.includes("--confirm");
 }
 
+/**
+ * Refuse to send from an address with nothing to spend, with the amount named.
+ *
+ * Called at the point of sending rather than at connect, so a dry run still
+ * prints the address and the gas estimate that tell you how much to send.
+ */
+export function assertFunded(chain, what) {
+  if (chain.funded) return;
+  console.error(
+    `Cannot ${what}: ${chain.account.address} holds no native balance on chain ` +
+      `${chain.chainId}. Fund it and re-run.`
+  );
+  process.exit(1);
+}
+
+/**
+ * Refuse an address with no contract code at it, by name.
+ *
+ * The mistake this catches is pointing a script at the right address on the
+ * wrong network, which the README already calls one of the two most likely.
+ * Without it the call returns empty bytes, web3 tries to decode them, and the
+ * operator gets "Parameter decoding error" — which names neither the address
+ * nor the network nor the mistake.
+ */
+export async function assertContractAt(web3, address, chainId) {
+  const code = await web3.eth.getCode(address);
+  if (code && code !== "0x" && code !== "0x0") return;
+  throw new Error(
+    `no contract code at ${address} on chain ${chainId}. Either the address is wrong, ` +
+      "or OREOCHAIN_CHAIN_RPC points at a different network from the one it was deployed to"
+  );
+}
+
 /** Connect, and report enough that the operator can tell which chain this is. */
 export async function connect({ rpcUrl, privateKey, web3Module }) {
   const { Web3 } = web3Module || (await import("web3"));
@@ -131,12 +164,20 @@ export async function connect({ rpcUrl, privateKey, web3Module }) {
     web3.eth.getBalance(account.address),
   ]);
 
-  if (BigInt(balance) === 0n) {
-    throw new Error(
-      `${account.address} holds no native balance on chain ${chainId} — fund it before ` +
-        "sending anything"
-    );
-  }
-
-  return { web3, account, chainId: Number(chainId), balance: String(balance) };
+  /*
+   * A zero balance is reported, not thrown.
+   *
+   * Throwing here meant neither script printed a line before it stopped, so
+   * the one thing you go to a dry run for — which address to fund, and how
+   * much gas this will take — was unavailable until after you had funded it.
+   * The scripts refuse to *send* without a balance, which is where the
+   * refusal belongs.
+   */
+  return {
+    web3,
+    account,
+    chainId: Number(chainId),
+    balance: String(balance),
+    funded: BigInt(balance) > 0n,
+  };
 }
