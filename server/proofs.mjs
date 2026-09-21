@@ -25,6 +25,7 @@ import {
   proveWholeBatch,
 } from "../js/core/anchor.js";
 import { readSecret } from "./config.mjs";
+import { checkStore } from "./integrity.mjs";
 import { openKeyring } from "./keyring.mjs";
 import { openStore } from "./store.mjs";
 import {
@@ -76,6 +77,7 @@ export async function createProofService(options = {}) {
 
   const verifier = options.verifier || null;
   const store = options.store || openStore({ path: options.dbPath || ":memory:" });
+  let lastIntegrity = null;
   const batchMaxSize = options.batchMaxSize ?? 1000;
   const batchMaxAgeMs = options.batchMaxAgeMs ?? 3600000;
   const now = options.now || (() => Date.now());
@@ -322,6 +324,31 @@ export async function createProofService(options = {}) {
         size: batch.size,
         builtAt: batch.builtAt,
       }));
+    },
+
+    /**
+     * Walk the whole store and confirm it still agrees with itself.
+     *
+     * Exposed here rather than left to the checker script because the gateway
+     * runs it at startup: a store that lost records in a restore parses
+     * cleanly, and the first person to notice would otherwise be a user whose
+     * proof could not be built.
+     */
+    async checkIntegrity(options) {
+      const report = await checkStore(store, options);
+      lastIntegrity = { checkedAt: now(), ...report };
+      return report;
+    },
+
+    /**
+     * The last integrity check, for /metrics.
+     *
+     * Kept because an operator who started with OREOCHAIN_ALLOW_DAMAGED_STORE
+     * has a gateway that is up, serving, and quietly unable to prove some of
+     * what it anchored. A startup log line scrolls away; a gauge does not.
+     */
+    integrity() {
+      return lastIntegrity;
     },
 
     close() {
