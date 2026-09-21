@@ -12,6 +12,7 @@
  */
 
 import { CHUNKED_VERIFICATION_ABI } from "./contract-abi.js";
+import { html, joinHtml, safe, toHtml } from "./core/html.js";
 
 const CONFIG = globalThis.OREOCHAIN_CONFIG || {};
 const CONTRACT = {
@@ -55,7 +56,7 @@ function el(id) {
 
 function note(message, tone = "info") {
   const target = el("note");
-  if (target) target.innerHTML = `<h5 class="text-${tone} text-center">${message}</h5>`;
+  if (target) target.innerHTML = html`<h5 class="text-${tone} text-center">${message}</h5>`.value;
 }
 
 function configured() {
@@ -91,20 +92,23 @@ function chainNotice(wallet, readable) {
   if (!alert) return;
 
   const needsWallet = document.body.hasAttribute("data-needs-wallet");
-  const link = '<a target="_blank" rel="noopener" href="https://metamask.io/download">MetaMask</a>';
+  const link = safe(
+    '<a target="_blank" rel="noopener" href="https://metamask.io/download">MetaMask</a>'
+  );
 
   let message = null;
   if (!wallet && needsWallet) {
-    message = `This page needs a browser wallet to sign a transaction. Install ${link}.`;
+    message = html`This page needs a browser wallet to sign a transaction. Install ${link}.`;
   } else if (!readable) {
-    message =
+    message = safe(
       "No way to reach the chain: install a wallet, or set " +
-      "<code>contract.rpcUrl</code> in <code>js/config.js</code> to a read-only " +
-      "RPC endpoint.";
+        "<code>contract.rpcUrl</code> in <code>js/config.js</code> to a read-only " +
+        "RPC endpoint."
+    );
   }
 
   alert.classList.toggle("d-none", message === null);
-  if (message) alert.innerHTML = message;
+  if (message) alert.innerHTML = toHtml(message);
 }
 
 export function truncateAddress(address) {
@@ -165,9 +169,9 @@ export async function get_ChainID() {
   const target = el("network");
   if (target) {
     const mismatch = CONTRACT.chainId && id !== Number(CONTRACT.chainId);
-    target.innerHTML = `<i class="fa-solid fa-circle-nodes mx-2 text-${
+    target.innerHTML = html`<i class="fa-solid fa-circle-nodes mx-2 text-${
       mismatch ? "danger" : "info"
-    }"></i>${window.chainID}${mismatch ? " — wrong network for this contract" : ""}`;
+    }"></i>${window.chainID}${mismatch ? " — wrong network for this contract" : ""}`.value;
   }
   return id;
 }
@@ -178,7 +182,7 @@ export async function get_ethBalance() {
   try {
     const balance = await window.web3.eth.getBalance(window.userAddress);
     const amount = Number(window.web3.utils.fromWei(balance, "ether")).toFixed(4);
-    target.innerHTML = `<i class="fa-brands fa-gg-circle mx-2 text-danger"></i>${amount}`;
+    target.innerHTML = html`<i class="fa-brands fa-gg-circle mx-2 text-danger"></i>${amount}`.value;
   } catch {
     target.innerHTML = "n/a";
   }
@@ -202,9 +206,11 @@ export async function getExporterInfo() {
     window.info = result[1] || result.info || "";
     const target = el("Exporter-info");
     if (target) {
-      target.innerHTML = window.info
-        ? `<i class="fa-solid fa-building-columns mx-2 text-warning"></i>${window.info}`
-        : `<i class="fa-solid fa-triangle-exclamation mx-2 text-warning"></i>Not an authorised exporter`;
+      target.innerHTML = toHtml(
+        window.info
+          ? html`<i class="fa-solid fa-building-columns mx-2 text-warning"></i>${window.info}`
+          : html`<i class="fa-solid fa-triangle-exclamation mx-2 text-warning"></i>Not an authorised exporter`
+      );
     }
     return window.info;
   } catch (error) {
@@ -222,8 +228,10 @@ export async function getCounters() {
     ]);
     const docs = el("num-hashes");
     const exps = el("num-exporters");
-    if (docs) docs.innerHTML = `<i class="fa-solid fa-file-lines mx-2 text-warning"></i>Documents: ${documents}`;
-    if (exps) exps.innerHTML = `<i class="fa-solid fa-users mx-2 text-warning"></i>Exporters: ${exporters}`;
+    if (docs)
+      docs.innerHTML = html`<i class="fa-solid fa-file-lines mx-2 text-warning"></i>Documents: ${documents}`.value;
+    if (exps)
+      exps.innerHTML = html`<i class="fa-solid fa-users mx-2 text-warning"></i>Exporters: ${exporters}`.value;
   } catch (error) {
     console.error(error);
   }
@@ -320,25 +328,31 @@ export async function listen() {
     });
 
     el("recent-header")?.classList.remove("d-none");
-    container.innerHTML = events
+    /*
+     * Every value in a card came off the chain, through whatever node the
+     * page is talking to. Each card is built with the tag and the cards are
+     * joined as safe values, so the joining does not launder them back into
+     * an ordinary string.
+     */
+    const cards = events
       .slice(-12)
       .reverse()
       .map((event) => {
         const { fileHash, totalChunks, encrypted } = event.returnValues;
-        return `<div class="col-lg-5 tx-card p-3 m-2">
+        return html`<div class="col-lg-5 tx-card p-3 m-2">
           <div class="text-break"><i class="fa-solid fa-hashtag mx-1"></i>${truncateAddress(
             fileHash
           )}</div>
           <div><i class="fa-solid fa-layer-group mx-1"></i>${totalChunks} chunks · ${
-          encrypted ? "encrypted" : "public"
-        }</div>
+            encrypted ? "encrypted" : "public"
+          }</div>
           <div><i class="fa-solid fa-cube mx-1"></i>Block ${event.blockNumber}</div>
           <a target="_blank" rel="noopener" href="${CONTRACT.explorer}/tx/${
-          event.transactionHash
-        }">View transaction</a>
+            event.transactionHash
+          }">View transaction</a>
         </div>`;
-      })
-      .join("");
+      });
+    container.innerHTML = toHtml(joinHtml(cards));
   } catch (error) {
     console.error(error);
   } finally {
@@ -392,11 +406,10 @@ window.addEventListener("load", async () => {
 
   const addressField = el("userAddress");
   if (addressField) {
-    addressField.innerHTML = `<i class="fa-solid fa-address-card mx-2 text-primary"></i>${truncateAddress(
+    const explore = `${CONTRACT.explorer}/address/${window.userAddress}`;
+    addressField.innerHTML = html`<i class="fa-solid fa-address-card mx-2 text-primary"></i>${truncateAddress(
       window.userAddress
-    )} <a class="text-info" target="_blank" rel="noopener" href="${CONTRACT.explorer}/address/${
-      window.userAddress
-    }"><i class="fa-solid fa-square-arrow-up-right text-warning"></i></a>`;
+    )} <a class="text-info" target="_blank" rel="noopener" href="${explore}"><i class="fa-solid fa-square-arrow-up-right text-warning"></i></a>`.value;
   }
 
   await get_ChainID();

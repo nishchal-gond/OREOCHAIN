@@ -310,6 +310,7 @@ js/core/kdf-worker.js              runs derivation off the page's thread
 js/core/receipt.js                 signed receipts
 js/core/validate.js                strict validation of untrusted manifests
 js/core/limits.js                  resource limits, all caller-overridable
+js/core/html.js                    escaping, so nothing rendered can become markup
 js/storage/ipfs.js                 storage adapters, retry/backoff, resume
 
 server/gateway.mjs                 HTTP handler: auth, limits, routing
@@ -318,7 +319,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              542 tests, including EVM cross-checks
+test/                              554 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -363,7 +364,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test           # 542 tests
+npm test           # 554 tests
 npm run test:e2e   # the pages driven in a real browser (needs Playwright)
 npm run abi        # regenerate js/contract-abi.js after changing the contract
 npm run vendor     # regenerate js/vendor/noble after changing a @noble version
@@ -410,6 +411,8 @@ Read [`docs/SECURITY.md`](docs/SECURITY.md) before relying on this. The short
 version:
 
 - Encryption happens in the browser. Only ciphertext is uploaded.
+- Nothing the gateway or the chain sends is rendered as markup. The pages hold
+  a passphrase field, so a service that could draw its own would be enough.
 - Every chunk has its own key and nonce; reordering and splicing are detectable.
 - **A lost passphrase means lost data.** There is no recovery and no backdoor.
 - Revocation clears the on-chain record. It does **not** delete pinned chunks.
