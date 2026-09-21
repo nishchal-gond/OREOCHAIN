@@ -21,6 +21,8 @@
  * is written down in server/README.md so nobody discovers it the hard way.
  */
 
+import { REFUSAL_CODES } from "./refusals.mjs";
+
 const DAY_MS = 86_400_000;
 
 export const CLIENT_BYTES = "client-bytes";
@@ -31,7 +33,7 @@ export const DAILY_OBJECTS = "daily-objects";
 /**
  * The `code` on a refusal is the stable token a client switches on; `scope`
  * says which of the two limits inside that code was hit, for an operator
- * reading logs. See REFUSAL_CODES in server/gateway.mjs.
+ * reading logs. See REFUSAL_CODES in server/refusals.mjs.
  *
  * @param {object} options all limits are "no limit" when null
  * @param {number|null} options.clientBytes bytes one client may pin per window
@@ -102,7 +104,7 @@ export function createQuota(options = {}) {
         return {
           allowed: false,
           scope: DAILY_OBJECTS,
-          code: "gateway_budget",
+          code: REFUSAL_CODES.GATEWAY_BUDGET,
           status: 503,
           retryAfterSeconds: secondsUntil((current.index + 1) * DAY_MS),
           message: "this gateway has pinned as much as it is allowed to today",
@@ -113,7 +115,7 @@ export function createQuota(options = {}) {
         return {
           allowed: false,
           scope: DAILY_BYTES,
-          code: "gateway_budget",
+          code: REFUSAL_CODES.GATEWAY_BUDGET,
           status: 503,
           retryAfterSeconds: secondsUntil((current.index + 1) * DAY_MS),
           message: "this gateway has pinned as much as it is allowed to today",
@@ -127,7 +129,7 @@ export function createQuota(options = {}) {
         return {
           allowed: false,
           scope: CLIENT_OBJECTS,
-          code: "client_quota",
+          code: REFUSAL_CODES.CLIENT_QUOTA,
           status: 429,
           retryAfterSeconds: secondsUntil(client.start + windowMs),
           message: "you have pinned as many objects as one client may in this window",
@@ -138,7 +140,7 @@ export function createQuota(options = {}) {
         return {
           allowed: false,
           scope: CLIENT_BYTES,
-          code: "client_quota",
+          code: REFUSAL_CODES.CLIENT_QUOTA,
           status: 429,
           retryAfterSeconds: secondsUntil(client.start + windowMs),
           message: "you have pinned as many bytes as one client may in this window",

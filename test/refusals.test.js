@@ -8,6 +8,9 @@ import {
   refusalAdvice,
 } from "../js/core/refusals.js";
 import * as gateway from "../server/gateway.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ------------------------------------------------------------- the vocabulary
 
@@ -34,6 +37,43 @@ test(
     );
   }
 );
+
+test("no server module writes a refusal code by hand", () => {
+  /*
+   * The comparison above is only as good as what the server actually sends.
+   * server/quota.mjs wrote two of these seven as bare strings — in a module
+   * other than the one that defines them, where nothing compares them to
+   * anything — so a rename would have moved the export and the client
+   * together and left the quota refusals behind, sending a code the client
+   * has never heard of from the routes most likely to refuse.
+   *
+   * It could not import them: the gateway imports quota, so quota importing
+   * the gateway back is a cycle. Hence server/refusals.mjs, which every
+   * module can import, and this, which notices the next one.
+   */
+  const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "server");
+  const values = Object.values(REFUSAL_CODES);
+  const offenders = [];
+
+  for (const name of fs.readdirSync(dir).filter((f) => f.endsWith(".mjs"))) {
+    if (name === "refusals.mjs") continue; // where they are defined
+    const source = fs.readFileSync(path.join(dir, name), "utf8");
+    for (const code of values) {
+      // The `code:` field specifically. The same word appears legitimately in
+      // prose, in a log reason and in the human-readable `error` string; what
+      // must not be hand-written is the token a client switches on.
+      if (new RegExp(`code:\\s*["'\`]${code}["'\`]`).test(source)) {
+        offenders.push(`${name}: code: "${code}"`);
+      }
+    }
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `these write a refusal code as a literal instead of importing REFUSAL_CODES: ${offenders}`
+  );
+});
 
 test("every code has advice, and it is one of the three faults", () => {
   for (const code of Object.values(REFUSAL_CODES)) {

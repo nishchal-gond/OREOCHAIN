@@ -384,7 +384,8 @@ endpoint only as a chain read it cannot perform itself.
 | Status | Meaning | HTTP |
 |---|---|---|
 | `verified` | anchored, by whichever paths `anchoredBy` names | 200 |
-| `not-anchored` | recorded here, proof valid, not yet on-chain by either path | 200 |
+| `receipted` | accepted and receipted here, not in a batch yet, anchor still owed | 200 |
+| `not-anchored` | in a batch, proof valid, not yet on-chain by either path | 200 |
 | `disputed` | the chain disagrees with this gateway; see `warnings` | 200 |
 | `unchecked` | this gateway is not configured to read the chain | 200 |
 | `unavailable` | the chain could not be reached — **not** a negative | 503 + `Retry-After` |
@@ -394,6 +395,20 @@ endpoint only as a chain read it cannot perform itself.
 `unavailable` exists because a regulator acting on a false "this document is
 not anchored" is the worst thing this endpoint can produce. An RPC that is
 down says so; it never becomes a "no".
+
+`receipted` exists for the same reason. A document is recorded and receipted
+the moment it is uploaded, and joins a batch only when
+`OREOCHAIN_BATCH_MAX_SIZE` or `OREOCHAIN_BATCH_MAX_AGE_MS` says so — an hour by
+default. This route used to answer 404 `unknown` for that whole window, the
+same answer a document nobody has ever heard of gets, while the signed receipt
+for it sat in this gateway's own store. `receipted` and `unknown` are now the
+difference between "accepted, anchor still owed" and "never seen", and only the
+second is a 404. The receipt travels with it, so a verifier can check the
+signature during the wait rather than being told there is nothing to check.
+
+`receipted` and `not-anchored` are consecutive states, not synonyms:
+`not-anchored` has a batch and a valid inclusion proof and waits only on the
+chain, which is real work a verifier can do. `receipted` has neither yet.
 
 **Cost control.** This is the only public route that does outside work per
 call, so: a confirmed anchor is cached for `OREOCHAIN_CHAIN_CACHE_MS` (an

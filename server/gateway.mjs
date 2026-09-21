@@ -32,6 +32,7 @@ import { createMetrics } from "./metrics.mjs";
 import { createRateLimiter } from "./ratelimit.mjs";
 import { clientAddress } from "./clientaddr.mjs";
 import { createQuota } from "./quota.mjs";
+import { REFUSAL_CODES } from "./refusals.mjs";
 import { ABSENT, CONFIRMED, UNAVAILABLE } from "./confirm.mjs";
 import { verifyInBatch } from "../js/core/anchor.js";
 
@@ -64,27 +65,11 @@ const ANCHOR_PAGE = 100;
 const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]{1,64}$/;
 
 /**
- * Why a request was refused, as one stable token a client can switch on.
- *
- * Status codes are not enough here, because two of them mean opposite things
- * on the same route. A 429 from the token bucket means "slow down and try
- * again"; a 429 from a per-window byte cap means "not until your window
- * rolls". A 503 from load shedding means "try in a second"; a 503 from the
- * daily budget means "not today". A client that cannot tell them apart either
- * retries a spent budget in a loop, or tells a user the service is out of
- * quota when two uploads happened to be in flight for a second.
- *
- * Prose is for people and changes freely. This does not.
+ * Re-exported, not defined here: see server/refusals.mjs for why, and for
+ * what this set is. Kept exported from this module because that is where the
+ * browser client's cross-check imports it from.
  */
-export const REFUSAL_CODES = Object.freeze({
-  RATE_LIMITED: "rate_limited",
-  BUSY: "busy",
-  CLIENT_QUOTA: "client_quota",
-  GATEWAY_BUDGET: "gateway_budget",
-  UNAUTHORIZED: "unauthorized",
-  FORBIDDEN: "forbidden",
-  BAD_REQUEST: "bad_request",
-});
+export { REFUSAL_CODES } from "./refusals.mjs";
 
 function requestId(req) {
   const supplied = req.headers["x-request-id"];
@@ -312,7 +297,7 @@ async function serveStatic(req, res, root) {
   // anything else a cleverer string filter would miss.
   const resolved = path.resolve(root, "." + path.posix.normalize(requested));
   if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-    sendJson(res, 403, { error: "forbidden" });
+    sendJson(res, 403, { code: REFUSAL_CODES.FORBIDDEN, error: "forbidden" });
     return true;
   }
 
@@ -567,6 +552,47 @@ export function createHandler(config, backend, deps = {}) {
       },
     });
 
+    /**
+     * Recorded, receipted, and not yet in a batch.
+     *
+     * This window is every upload's first OREOCHAIN_BATCH_MAX_AGE_MS, and it
+     * used to answer 404 "unknown" — the same answer a document nobody has
+     * ever heard of gets — while the signed receipt for it sat in this
+     * gateway's own store. That is the one output this endpoint's whole design
+     * says must never be produced carelessly: a verifier who acts on "no
+     * record" does something irreversible, and here they would have been
+     * acting on a document that had been accepted minutes earlier.
+     *
+     * `receipted` rather than `not-anchored`, which is the next state along:
+     * that one has a batch and a valid inclusion proof and is waiting only on
+     * the chain, and a verifier can do real work with it. This one has
+     * neither yet. Collapsing the two would hide exactly the difference a
+     * verifier needs — whether there is anything to check — behind a `batch`
+     * field they would have to know to look at.
+     *
+     * The word is the one the browser client already uses for this state.
+     */
+    const pendingClaim = () => ({
+      verified: false,
+      status: "receipted",
+      anchoredBy: [],
+      explain:
+        "this gateway accepted this document and signed a receipt for it, and the anchor is " +
+        "still owed. It is not in a batch yet, so there is no inclusion proof to check and " +
+        "nothing on-chain to find. Check the receipt's signature; this is not a statement " +
+        "that the document is unregistered.",
+    });
+
+    const batchedClaim = () => ({
+      verified: false,
+      status: "not-anchored",
+      anchoredBy: [],
+      explain:
+        "the document is recorded here and its inclusion proof is valid, but the batch it " +
+        "belongs to has not been anchored on-chain yet, and it has no per-document " +
+        "registration either",
+    });
+
     const proof = await proofs.proofFor(fileHash);
     const receipt = proofs.receiptFor(fileHash);
 
@@ -605,7 +631,7 @@ export function createHandler(config, backend, deps = {}) {
     }
 
     if (!confirmer) {
-      if (!proof) {
+      if (!proof && !receipt) {
         return answer(404, {
           verified: false,
           status: "unknown",
@@ -614,6 +640,9 @@ export function createHandler(config, backend, deps = {}) {
             "this gateway has no record of that document, and it is not configured to read " +
             "the chain, so it cannot say whether the document is registered there",
         });
+      }
+      if (!proof) {
+        return answer(200, pendingClaim(), { receipt, batch: null, registration: null, chainRead: null });
       }
       return answer(
         200,
@@ -776,17 +805,13 @@ export function createHandler(config, backend, deps = {}) {
       return answer(200, claim, materials);
     }
 
-    if (!proof) {
+    if (!proof && !receipt) {
       claim.status = "unknown";
       claim.explain = "neither this gateway nor the contract has any record of that document";
       return answer(404, claim, materials);
     }
 
-    claim.status = "not-anchored";
-    claim.explain =
-      "the document is recorded here and its inclusion proof is valid, but the batch it " +
-      "belongs to has not been anchored on-chain yet, and it has no per-document " +
-      "registration either";
+    Object.assign(claim, proof ? batchedClaim() : pendingClaim());
     return answer(200, claim, materials);
   }
 
@@ -941,7 +966,7 @@ export function createHandler(config, backend, deps = {}) {
         const auth = authenticate(req, config);
         if (!auth.ok) {
           res.setHeader("WWW-Authenticate", 'Bearer realm="oreochain"');
-          fail(401, { error: "unauthorized" });
+          fail(401, { code: REFUSAL_CODES.UNAUTHORIZED, error: "unauthorized" });
           return;
         }
         const body = metrics.render(METRIC_HELP);
