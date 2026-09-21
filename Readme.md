@@ -122,6 +122,39 @@ Two properties follow that a single-key design cannot offer:
   forgery. Here every key is used exactly once, so the condition cannot arise
   regardless of file size or how many files share a passphrase.
 
+#### Sharing without sharing a passphrase
+
+The passphrase wraps the file key for one person. A file can additionally — or
+instead — have its file key wrapped to any number of **recipient public keys**:
+
+```
+                    ┌─ Argon2id(passphrase) ──wraps──┐
+                    │                                ├──► file key ──HKDF──► chunk keys
+recipient public ───┴─ ECDH(ephemeral, recipient) ───┘
+        key              ──wraps──►
+```
+
+Each recipient generates a keypair once (`npm run recipient-key`), publishes the
+public half and keeps the private half. A sender seals to the public half; only
+the private half opens it. Nobody has to be told a secret, revoking someone is
+re-sealing without them rather than a conversation about changing a shared
+passphrase, and a file can carry both routes so the uploader keeps a way in that
+does not depend on still holding a device.
+
+One ephemeral-static ECDH per recipient, on P-256 — the one asymmetric primitive
+WebCrypto offers in every browser and on Node 18. Both public keys are bound into
+the HKDF info, and the file hash into the AEAD's additional data, so an entry
+cannot be re-pointed at another key or lifted into another file's manifest.
+
+Entries carry **no recipient identifier** — not a key id, not a fingerprint. The
+manifest header is public, so naming recipients in it would publish who a
+document was shared with to anyone who can fetch the CID, which is usually the
+more sensitive of the two facts. Opening a file instead tries each entry until
+one decrypts, bounded at 64 entries.
+
+Available today in `js/core/` and from the CLI; the shipped web pages still
+offer only the passphrase field.
+
 Each chunk's authentication tag also covers *where it sits*:
 
 ```
@@ -306,6 +339,7 @@ js/core/suites.js                  cipher suite registry
 js/core/manifest.js                the pipeline: pack, seal, open, restore, stream
 js/core/anchor.js                  batch trees and inclusion proofs
 js/core/kdf.js                     Argon2id passphrase stretching (+ legacy PBKDF2)
+js/core/recipients.js              wrapping the file key to recipient public keys
 js/core/kdf-worker.js              runs derivation off the page's thread
 js/core/receipt.js                 signed receipts
 js/core/validate.js                strict validation of untrusted manifests
@@ -319,7 +353,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              554 tests, including EVM cross-checks
+test/                              590 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -364,7 +398,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test           # 554 tests
+npm test           # 590 tests
 npm run test:e2e   # the pages driven in a real browser (needs Playwright)
 npm run abi        # regenerate js/contract-abi.js after changing the contract
 npm run vendor     # regenerate js/vendor/noble after changing a @noble version
@@ -435,16 +469,19 @@ undocumented is a security system nobody can evaluate.
 
 In priority order, with reasoning rather than dates:
 
-1. **Automated batch submission**, so anchoring needs no operator action.
-2. **Multi-recipient key wrapping** — share a document without sharing a
-   passphrase.
-3. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap)
+1. **Recipient keys in the web UI.** The wrapping is implemented and tested in
+   `js/core/recipients.js`, and the pages do not expose it yet: sharing a file
+   today means driving the core from a script.
+2. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap)
    for records that must stay confidential for decades. "Harvest now, decrypt
    later" is a real concern for long-lived documents.
-4. **Replication across independent pinning providers**, with on-chain
+3. **Replication across independent pinning providers**, with on-chain
    challenges proving a provider still holds a given block.
-5. **A professional cryptographic review**, before this protects anything that
+4. **A professional cryptographic review**, before this protects anything that
    matters.
+
+Shipped since this list was last written: automated batch submission, and
+multi-recipient key wrapping in the core.
 
 ---
 

@@ -223,7 +223,61 @@ random file key), so identical documents are not linkable in storage — while t
 public file hash and Merkle root still match, so the chain recognises them as
 the same document.
 
-### 2.7 Manifest confidentiality
+### 2.7 Wrapping to recipient public keys
+
+The envelope above wraps the file key for whoever knows the passphrase. A file
+key may additionally, or instead, be wrapped to any number of recipient public
+keys, so a document can be shared without a shared secret ever being spoken.
+
+Per recipient, one ephemeral-static ECDH — the ECIES shape, with the file key as
+the payload:
+
+```
+(e, E)  = a fresh P-256 keypair, per recipient per file
+Z       = ECDH(e, R)                              R = the recipient's public key
+key‖iv  = HKDF-SHA256(Z, salt = fileSalt, info = <version> ‖ E ‖ R)
+entry   = E, AES-256-GCM(key, iv, fileKey, aad = <envelope>|recipient|<fileHash>)
+```
+
+**P-256, not X25519.** X25519 is the better curve and the one a greenfield
+design would pick. This has to run in whatever browser the *recipient* has, and
+P-256 ECDH is the only asymmetric primitive WebCrypto has offered universally
+for a decade — X25519 reached Chrome's WebCrypto in 2025 and is not everywhere
+yet. The alternative, shipping a curve implementation of our own, trades a
+platform primitive for code this project would then have to be trusted to have
+got right; §1 is the argument against that.
+
+What the construction binds, and why each binding is there:
+
+- **Both public keys in the HKDF info.** Without it, an attacker who re-points
+  an entry at a key of their own still derives cleanly — the unknown key-share
+  shape, where two parties agree a key while disagreeing about whom with.
+- **The file hash in the AEAD's additional data.** An entry cannot be lifted out
+  of one file's manifest and pasted into another's.
+- **The nonce derived, not stored.** It is a function of a freshly generated
+  ephemeral key, so it is unique by construction, and deriving it removes a
+  field a hostile manifest would otherwise choose. Two entries sharing one
+  ephemeral key would be one (key, nonce) pair over two plaintexts — the AES-GCM
+  failure that hands over both — so the validator rejects a manifest containing
+  one.
+- **The file salt as the HKDF salt.** One pair of keys wrapping two files agrees
+  two unrelated wrapping keys.
+
+**Entries name nobody.** No key id, no fingerprint, no label. The header is
+public, so a recipient list in it publishes who a document was shared with to
+everyone who can fetch the CID — routinely the more sensitive of the two facts,
+since a document's existence is rarely news and its distribution list is. A
+reader instead tries each entry until one opens: one ECDH and one AES-GCM open
+per entry, bounded by `maxRecipients` (64), against an Argon2id derivation
+measured in seconds. The bound is checked before the first scalar
+multiplication, because the entry list arrives from whoever served the manifest.
+
+Revocation is re-sealing. A manifest already published cannot have an entry
+taken out of it, so dropping a recipient means packing the file again under a
+fresh file key — the old manifest keeps opening for everyone it was sealed to,
+and anyone who already held the bytes always will.
+
+### 2.8 Manifest confidentiality
 
 The manifest splits into a public header and an encrypted body:
 
@@ -255,7 +309,7 @@ Each downloaded chunk passes three independent checks:
 Then the reassembled file's SHA-256 and length are compared to the manifest.
 Any mismatch raises; partial or "best effort" output is never returned.
 
-### 2.8 Manifests are treated as hostile input
+### 2.9 Manifests are treated as hostile input
 
 A manifest arrives from whatever storage served its CID. Anyone who can serve
 those bytes — a hostile gateway, a compromised pinning service, a network
@@ -279,7 +333,7 @@ The interesting attacks there never reach the crypto at all:
 used, and `js/core/limits.js` makes every bound explicit and overridable, rather
 than leaving it implied by whatever the machine happens to tolerate.
 
-### 2.9 The gateway never holds a key
+### 2.10 The gateway never holds a key
 
 `server/` sits between users and the pinning provider so the pinning credential
 never reaches a browser — a browser cannot keep a secret, and any token shipped
@@ -297,9 +351,9 @@ arrive rather than after buffering, strict CID validation before any upstream
 request, and a refusal to start when misconfigured rather than silently
 accepting anonymous uploads.
 
-### 2.10 Nothing the service sends becomes markup
+### 2.11 Nothing the service sends becomes markup
 
-§2.8 treats a manifest as hostile. The same reasoning applies one layer up, to
+§2.9 treats a manifest as hostile. The same reasoning applies one layer up, to
 every string the pages display: a CID and a `kid` from the gateway, a
 transaction hash and an exporter's name from the chain, a refusal code out of
 a JSON body. Those are rendered next to icons and links, which makes writing
@@ -350,6 +404,9 @@ asserts no such element exists in the document afterwards.
 | One client exhausting the pinning quota | Per-key rate limiting |
 | API key recovery by timing | Constant-time comparison over hashed values |
 | Gateway or chain data injected as markup into the page | Escaped at every sink; enforced by a source scan |
+| Sharing a document forcing a shared passphrase | File key wrapped to each recipient's public key |
+| Learning who a document was shared with, from its manifest | Recipient entries carry no identifier; readers trial-decrypt |
+| A recipient entry re-pointed at another key, or reused across files | Both public keys in the HKDF info; file hash in the AEAD's AAD |
 
 ### Not defended
 
@@ -358,6 +415,13 @@ an audit.
 
 - **A lost passphrase means lost data.** There is no recovery, no reset and no
   backdoor. That is the design, and it is the most common way users lose files.
+- **A lost recipient identity is the same loss**, and a leaked one is worse: the
+  wrapped file keys are public, so whoever holds the identity opens every
+  document ever sealed to it, retroactively. The wrap is not forward-secret —
+  the recipient's key is long-term by design, since a sender must be able to
+  seal to someone who is not online.
+- **A recipient can redistribute what they were sent.** Wrapping to a public key
+  controls who can open a document, not what they do with it afterwards.
 - **A compromised browser or device defeats everything.** Encryption happens in
   the page; malware or a malicious extension sees plaintext and the passphrase.
 - **Weak passphrases fall to offline attack.** PBKDF2 raises the cost per guess,
@@ -422,14 +486,18 @@ an audit.
 
 ## 6. Roadmap, in priority order
 
-1. **A backend pinning proxy** so credentials leave the browser entirely, plus
-   rate limiting and per-user quotas.
-2. **Multi-recipient key wrapping** — wrap the file key to several public keys so
-   a document can be shared without sharing a passphrase.
-3. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap) for
+1. **Recipient keys in the web UI.** §2.7 is implemented and tested in
+   `js/core/recipients.js`; the shipped pages still offer only the passphrase
+   field, so sharing today means driving the core from a script.
+2. **Hybrid post-quantum key wrapping** (ML-KEM alongside the classical wrap) for
    documents that must stay confidential for decades. "Harvest now, decrypt
-   later" is a real concern for long-lived records.
-4. **Replication across independent pinning providers**, with on-chain challenges
+   later" is a real concern for long-lived records, and it applies with most
+   force to §2.7: a recipient wrap is a public ciphertext against a long-term
+   key, which is exactly what harvesting collects.
+3. **Replication across independent pinning providers**, with on-chain challenges
    using `verifyChunk` to prove a provider still holds a given block.
-5. **A professional cryptographic review** before this protects anything that
+4. **A professional cryptographic review** before this protects anything that
    matters.
+
+Shipped since this list was last written: the backend pinning proxy (the
+gateway), and multi-recipient key wrapping in the core.

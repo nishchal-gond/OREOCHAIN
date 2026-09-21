@@ -23,9 +23,11 @@
 
 import { MANIFEST_LIMITS } from "./limits.js";
 import { assertArgon2Shape, KDF_ARGON2ID, KDF_PBKDF2, normalizeKdfName } from "./kdf.js";
+import { RECIPIENT_FIELD_LIMITS } from "./recipients.js";
 
 const HEX32 = /^0x[0-9a-f]{64}$/;
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+const BASE64URL = /^[A-Za-z0-9_-]*$/;
 // CIDs are base32/base58/base36 alphanumerics. Deliberately strict: no slashes,
 // dots, colons or control characters, so a location can never escape a path or
 // switch protocol when an adapter builds a URL from it.
@@ -166,22 +168,39 @@ export function validateManifestHeader(manifest, limits = {}) {
   }
 
   if (manifest.encrypted) {
-    if (manifest.kdf === null || typeof manifest.kdf !== "object") {
-      fail("kdf parameters are missing");
-    }
-    requireString(manifest.kdf.name, "kdf.name", { max: 64 });
-    requireString(manifest.kdf.salt, "kdf.salt", { max: 128, pattern: BASE64 });
-    validateKdfParameters(manifest.kdf, bounds);
     requireString(manifest.fileSalt, "fileSalt", { max: 128, pattern: BASE64 });
 
-    if (manifest.wrappedKey === null || typeof manifest.wrappedKey !== "object") {
-      fail("wrappedKey is missing");
+    // The file key may be wrapped under a passphrase, to a set of recipient
+    // public keys, or both — but an encrypted manifest carrying neither
+    // describes a file nobody can ever open, including whoever wrote it.
+    const byPassphrase = manifest.wrappedKey !== undefined && manifest.wrappedKey !== null;
+    const byRecipient = manifest.recipients !== undefined && manifest.recipients !== null;
+
+    if (!byPassphrase && !byRecipient) {
+      fail("an encrypted manifest must carry a wrappedKey, recipients, or both");
     }
-    requireString(manifest.wrappedKey.iv, "wrappedKey.iv", { max: 64, pattern: BASE64 });
-    requireString(manifest.wrappedKey.ciphertext, "wrappedKey.ciphertext", {
-      max: 256,
-      pattern: BASE64,
-    });
+
+    if (byPassphrase) {
+      if (typeof manifest.wrappedKey !== "object" || Array.isArray(manifest.wrappedKey)) {
+        fail("wrappedKey must be an object");
+      }
+      requireString(manifest.wrappedKey.iv, "wrappedKey.iv", { max: 64, pattern: BASE64 });
+      requireString(manifest.wrappedKey.ciphertext, "wrappedKey.ciphertext", {
+        max: 256,
+        pattern: BASE64,
+      });
+
+      // Only the passphrase path derives anything, so only it needs these.
+      // A file shared purely to recipient keys has no passphrase to stretch.
+      if (manifest.kdf === null || typeof manifest.kdf !== "object") {
+        fail("kdf parameters are missing");
+      }
+      requireString(manifest.kdf.name, "kdf.name", { max: 64 });
+      requireString(manifest.kdf.salt, "kdf.salt", { max: 128, pattern: BASE64 });
+      validateKdfParameters(manifest.kdf, bounds);
+    }
+
+    if (byRecipient) validateRecipients(manifest.recipients, bounds);
 
     requireString(manifest.suite, "suite", { max: 64 });
     requireString(manifest.body, "body", {
@@ -193,6 +212,56 @@ export function validateManifestHeader(manifest, limits = {}) {
   }
 
   return manifest;
+}
+
+/**
+ * Validate the recipient entries of a manifest sealed to public keys.
+ *
+ * Each entry is an ephemeral public key and a wrapped file key, and both are
+ * fixed-length: a field of any other length cannot be what it claims to be, so
+ * it is rejected here rather than being fed to an EC point import further in.
+ * The count is bounded before that, because opening a file tries every entry in
+ * turn and the list arrives from whoever served the manifest.
+ */
+export function validateRecipients(recipients, limits = {}) {
+  const bounds = { ...MANIFEST_LIMITS, ...limits };
+
+  if (!Array.isArray(recipients)) fail("recipients must be an array");
+  if (recipients.length === 0) {
+    fail("recipients is present but empty — omit it, or list at least one recipient");
+  }
+  if (recipients.length > bounds.maxRecipients) {
+    fail(`recipients lists ${recipients.length} entries, above the maximum of ${bounds.maxRecipients}`);
+  }
+
+  const seen = new Set();
+
+  recipients.forEach((entry, i) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      fail(`recipients[${i}] must be an object`);
+    }
+
+    requireString(entry.ephemeral, `recipients[${i}].ephemeral`, {
+      max: RECIPIENT_FIELD_LIMITS.ephemeral,
+      pattern: BASE64URL,
+    });
+    requireString(entry.ciphertext, `recipients[${i}].ciphertext`, {
+      max: RECIPIENT_FIELD_LIMITS.ciphertext,
+      pattern: BASE64URL,
+    });
+
+    // Each entry is wrapped under a freshly generated ephemeral key, and the
+    // wrapping key AND nonce are derived from it. Two entries sharing one
+    // ephemeral key therefore encrypt twice under one key and nonce for any
+    // recipient they are both addressed to — the AES-GCM failure that hands
+    // over the plaintext. No honest writer produces it.
+    if (seen.has(entry.ephemeral)) {
+      fail(`recipients[${i}] reuses the ephemeral key of an earlier entry`);
+    }
+    seen.add(entry.ephemeral);
+  });
+
+  return recipients;
 }
 
 /**

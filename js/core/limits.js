@@ -46,6 +46,17 @@ export const MANIFEST_LIMITS = {
   maxArgon2Parallelism: 16,
 
   /**
+   * Recipients a file may be sealed to.
+   *
+   * Opening a file means trying each entry until one decrypts — the manifest
+   * does not say which entry is whose, deliberately — so this is also the
+   * number of scalar multiplications a manifest can ask a reader to perform
+   * before it gets to say no. 64 is far past any real distribution list and
+   * still a few milliseconds of work.
+   */
+  maxRecipients: 64,
+
+  /**
    * Above this, restoreFile() refuses rather than assembling in memory.
    * Callers that can stream should use restoreFileStream() instead.
    */

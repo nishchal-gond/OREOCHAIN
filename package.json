@@ -20,6 +20,7 @@
     "abi": "node scripts/generate-abi.mjs",
     "deploy-contract": "node scripts/deploy-contract.mjs",
     "add-exporter": "node scripts/add-exporter.mjs",
+    "recipient-key": "node scripts/generate-recipient-key.mjs",
     "kdf-docs": "node scripts/sync-kdf-docs.mjs",
     "test:e2e": "node --test test/e2e/*.test.js",
     "vendor": "node scripts/vendor-noble.mjs",

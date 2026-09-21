@@ -11,7 +11,8 @@
  * ------------
  * A manifest is split into a public header and an encrypted body:
  *
- *   header  version, KDF parameters, the wrapped file key, the file's salt,
+ *   header  version, KDF parameters, the wrapped file key (under a passphrase,
+ *           to a set of recipient public keys, or both), the file's salt,
  *           the plaintext file hash, the Merkle root, chunk count, total size.
  *           Anyone can read this; it is what the on-chain record commits to.
  *
@@ -56,6 +57,11 @@ import {
   unwrapFileKey,
   wrapFileKey,
 } from "./crypto.js";
+import {
+  parseRecipient,
+  unwrapWithIdentity,
+  wrapToRecipients,
+} from "./recipients.js";
 import { DEFAULT_SUITE, getSuite } from "./suites.js";
 import { DEFAULT_KDF, kdfSpec } from "./kdf.js";
 import { MANIFEST_LIMITS, NETWORK_LIMITS } from "./limits.js";
@@ -98,6 +104,30 @@ function shouldEncrypt(passphrase) {
   return true;
 }
 
+/**
+ * The same question for the recipient list, answered the same way.
+ *
+ * An omitted list means "no recipients" and is honoured. An explicitly empty
+ * one is a mistake with the same shape as the empty passphrase above — a list
+ * built by filtering, where the filter matched nothing — and answering it with
+ * a plaintext file on a public gateway is the wrong answer. A caller who means
+ * to store in the clear says so by passing neither.
+ */
+function shouldSealToRecipients(recipients) {
+  if (recipients === null || recipients === undefined) return false;
+  if (!Array.isArray(recipients)) {
+    throw new Error(
+      `recipients must be an array of recipient keys or null, received ${typeof recipients}`
+    );
+  }
+  if (recipients.length === 0) {
+    throw new Error(
+      "recipients is an empty list — omit it to store a file without recipients, rather than []"
+    );
+  }
+  return true;
+}
+
 /** The writer's half of validateManifestHeader(): what the reader will demand. */
 function assertPackable(fileBytes, chunkSize, limits) {
   const bounds = { ...MANIFEST_LIMITS, ...limits };
@@ -135,6 +165,8 @@ function assertPackable(fileBytes, chunkSize, limits) {
  * @param {string} options.fileName
  * @param {string} [options.mimeType]
  * @param {string|null} [options.passphrase] omit or pass null to store in the clear
+ * @param {string[]|null} [options.recipients] recipient public keys to seal the
+ *   file key to as well as, or instead of, a passphrase — see js/core/recipients.js
  * @param {string} [options.suite] cipher suite name, see js/core/suites.js
  * @param {object|string} [options.kdf] passphrase KDF, see js/core/kdf.js
  * @param {number} [options.chunkSize]
@@ -148,22 +180,42 @@ export async function packFile(fileBytes, options = {}) {
     fileName = "document",
     mimeType = "application/octet-stream",
     passphrase = null,
+    recipients = null,
     suite = DEFAULT_SUITE,
     chunkSize = DEFAULT_CHUNK_SIZE,
     kdf = DEFAULT_KDF,
     onProgress,
   } = options;
 
-  const encrypted = shouldEncrypt(passphrase);
-  // Fail fast on an unknown suite or KDF, before doing any expensive work.
-  const kdfParams = encrypted ? kdfSpec(kdf) : null;
+  const limits = options.limits || {};
+
+  // Either route to the file key encrypts the file; a file may take both, so
+  // that the person who uploaded it keeps a way in that does not depend on
+  // still holding a device.
+  const byPassphrase = shouldEncrypt(passphrase);
+  const byRecipient = shouldSealToRecipients(recipients);
+  const encrypted = byPassphrase || byRecipient;
+
+  // Fail fast on an unknown suite, KDF or recipient key, before doing any
+  // expensive work. A malformed key found after a gigabyte has been encrypted
+  // is the same error reported at the worst possible moment.
+  const kdfParams = byPassphrase ? kdfSpec(kdf) : null;
   if (encrypted) getSuite(suite);
+  if (byRecipient) {
+    const bounds = { ...MANIFEST_LIMITS, ...limits };
+    if (recipients.length > bounds.maxRecipients) {
+      throw new Error(
+        `${recipients.length} recipients is above the maximum of ${bounds.maxRecipients}`
+      );
+    }
+    recipients.forEach(parseRecipient);
+  }
 
   // The writer is held to the same limits the reader enforces. Without this a
   // caller can pack, encrypt, upload and anchor a file whose manifest
   // validateManifestHeader() will reject forever — the bytes are in storage,
   // the root is on-chain, and nothing can open it again.
-  assertPackable(fileBytes, chunkSize, options.limits || {});
+  assertPackable(fileBytes, chunkSize, limits);
 
   const plainChunks = splitIntoChunks(fileBytes, chunkSize);
   const totalChunks = plainChunks.length;
@@ -176,7 +228,8 @@ export async function packFile(fileBytes, options = {}) {
 
   const fileKey = encrypted ? generateFileKey() : null;
   const fileSalt = encrypted ? generateSalt() : null;
-  const kdfSalt = encrypted ? generateSalt() : null;
+  // Only the passphrase route stretches anything, so only it needs a KDF salt.
+  const kdfSalt = byPassphrase ? generateSalt() : null;
 
   const chunks = [];
   for (let index = 0; index < totalChunks; index++) {
@@ -223,7 +276,9 @@ export async function packFile(fileBytes, options = {}) {
     _fileSalt: fileSalt,
     _kdfSalt: kdfSalt,
     _kdf: kdfParams,
-    _passphrase: passphrase,
+    _passphrase: byPassphrase ? passphrase : null,
+    _recipients: byRecipient ? [...recipients] : null,
+    _limits: limits,
   };
 }
 
@@ -278,20 +333,38 @@ export async function sealManifest(packed, locations) {
   };
 
   if (packed.encrypted) {
-    const wrapped = await wrapFileKey(
-      packed._fileKey,
-      packed._passphrase,
-      packed._kdfSalt,
-      packed._kdf
-    );
-    // The full parameter set travels with the file: a reader must reproduce the
-    // derivation exactly, and hardcoding it would strand files on one setting.
-    header.kdf = { ...packed._kdf, salt: toBase64(packed._kdfSalt) };
     header.fileSalt = toBase64(packed._fileSalt);
-    header.wrappedKey = {
-      iv: toBase64(wrapped.iv),
-      ciphertext: toBase64(wrapped.ciphertext),
-    };
+
+    // Truthiness, not `!== null`: a passphrase is a non-empty string or null
+    // and a recipient list a non-empty array or null, so this is exact — and it
+    // does not mistake a `packed` missing the field entirely for one carrying it.
+    if (packed._passphrase) {
+      const wrapped = await wrapFileKey(
+        packed._fileKey,
+        packed._passphrase,
+        packed._kdfSalt,
+        packed._kdf
+      );
+      // The full parameter set travels with the file: a reader must reproduce the
+      // derivation exactly, and hardcoding it would strand files on one setting.
+      header.kdf = { ...packed._kdf, salt: toBase64(packed._kdfSalt) };
+      header.wrappedKey = {
+        iv: toBase64(wrapped.iv),
+        ciphertext: toBase64(wrapped.ciphertext),
+      };
+    }
+
+    if (packed._recipients) {
+      // Re-sealing generates fresh ephemeral keys, so the wraps differ between
+      // two seals of one packed file. That is the safe direction: the wrapping
+      // key and its nonce are derived from the ephemeral key, so a reused one
+      // would be a reused nonce.
+      header.recipients = await wrapToRecipients(packed._fileKey, packed._recipients, {
+        fileSalt: packed._fileSalt,
+        fileHashHex: packed.fileHashHex,
+        limits: packed._limits,
+      });
+    }
 
     const derived = await deriveManifestKey(packed._fileKey, packed._fileSalt);
     const sealed = await sealWithDerivedKey(utf8(bodyJson), derived, MANIFEST_AAD);
@@ -346,9 +419,16 @@ function assertBodyNotAlreadySealed(packed, bodyJson) {
 /**
  * Recover the file key and the chunk table from a manifest.
  * For an encrypted manifest this is where a wrong passphrase is caught.
+ *
+ * @param {object} manifest
+ * @param {string|null} [passphrase]
+ * @param {object} [options]
+ * @param {string} [options.identity] open the file with a recipient identity
+ *   instead of a passphrase — see js/core/recipients.js
+ * @param {object} [options.limits] overrides for MANIFEST_LIMITS
  */
 export async function openManifest(manifest, passphrase = null, options = {}) {
-  const { limits = {} } = options;
+  const { limits = {}, identity = null } = options;
 
   validateManifestHeader(manifest, limits);
   if (manifest.version !== MANIFEST_VERSION) {
@@ -363,24 +443,60 @@ export async function openManifest(manifest, passphrase = null, options = {}) {
     };
   }
 
-  if (typeof passphrase !== "string" || passphrase.length === 0) {
-    throw new Error("this file is encrypted — a passphrase is required");
+  const usingIdentity = identity !== null && identity !== undefined;
+  const hasPassphraseRoute = manifest.wrappedKey !== undefined && manifest.wrappedKey !== null;
+
+  if (!usingIdentity) {
+    // A file sealed only to recipient keys has no passphrase to ask for.
+    // Asking for one anyway sends its recipient looking for a secret that was
+    // never created, when what they need is the identity they already hold —
+    // and checking it here rather than at the unwrap means a caller who does
+    // supply a passphrase gets that sentence instead of a TypeError from the
+    // missing KDF parameters.
+    if (!hasPassphraseRoute) {
+      throw new Error(
+        "this file is sealed to recipient keys — open it with an identity " +
+          "(options.identity), not a passphrase"
+      );
+    }
+    if (typeof passphrase !== "string" || passphrase.length === 0) {
+      throw new Error("this file is encrypted — a passphrase is required");
+    }
   }
 
   getSuite(manifest.suite); // reject an unknown suite before doing PBKDF2 work
 
-  const kdfSalt = fromBase64(manifest.kdf.salt);
-  const fileKey = await unwrapFileKey(
-    {
-      iv: fromBase64(manifest.wrappedKey.iv),
-      ciphertext: fromBase64(manifest.wrappedKey.ciphertext),
-    },
-    passphrase,
-    kdfSalt,
-    manifest.kdf
-  );
-
   const fileSalt = fromBase64(manifest.fileSalt);
+
+  let fileKey;
+  if (usingIdentity) {
+    if (manifest.recipients === undefined || manifest.recipients === null) {
+      throw new Error(
+        "this file is not sealed to any recipient key — it can only be opened with its passphrase"
+      );
+    }
+    // The file hash is bound into each wrap, so an entry lifted from another
+    // file's manifest does not open here. It comes from the header that
+    // validateManifestHeader() has already checked, and the Merkle root ties
+    // that header to the on-chain record.
+    fileKey = await unwrapWithIdentity(manifest.recipients, identity, {
+      fileSalt,
+      fileHashHex: manifest.fileHash,
+      limits,
+    });
+  } else {
+    const kdfSalt = fromBase64(manifest.kdf.salt);
+    fileKey = await unwrapFileKey(
+      {
+        iv: fromBase64(manifest.wrappedKey.iv),
+        ciphertext: fromBase64(manifest.wrappedKey.ciphertext),
+      },
+      passphrase,
+      kdfSalt,
+      manifest.kdf
+    );
+  }
+
   const derived = await deriveManifestKey(fileKey, fileSalt);
   const plain = await openWithDerivedKey(fromBase64(manifest.body), derived, MANIFEST_AAD);
 

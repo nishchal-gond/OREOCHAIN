@@ -62,6 +62,31 @@ export function fromBase64(b64) {
   return out;
 }
 
+/**
+ * base64url, for values a person copies and pastes.
+ *
+ * Recipient keys and identities travel through URLs, shell arguments, chat
+ * messages and HTML inputs, where the `+` and `/` of standard base64 are
+ * variously escaped, split on, or silently mangled — and padding invites a
+ * trailing `=` being dropped by one hop and not the next. The URL-safe
+ * alphabet with padding stripped survives all of that unchanged.
+ */
+export function toBase64Url(bytes) {
+  return toBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const BASE64URL_ONLY = /^[A-Za-z0-9_-]*$/;
+
+export function fromBase64Url(text) {
+  if (typeof text !== "string") throw new Error("base64url input must be a string");
+  if (!BASE64URL_ONLY.test(text)) throw new Error("invalid base64url string");
+  // A length of 4n+1 encodes no whole number of bytes: it is malformed rather
+  // than merely unpadded, and padding it out would hand back bytes nobody wrote.
+  if (text.length % 4 === 1) throw new Error("invalid base64url string");
+  const padding = "=".repeat((4 - (text.length % 4)) % 4);
+  return fromBase64(text.replace(/-/g, "+").replace(/_/g, "/") + padding);
+}
+
 export function utf8(str) {
   return new TextEncoder().encode(str);
 }

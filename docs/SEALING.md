@@ -45,6 +45,41 @@ chunk key/nonce= HKDF-SHA256(fileKey, fileSalt, "<envelope>/<suite>/chunk/<i>")
 The passphrase never encrypts data directly — it only wraps the file key, so
 changing a passphrase rewraps 60 bytes instead of re-encrypting the whole file.
 
+### Recipient keys
+
+The file key can also be wrapped to public keys, so a document can be shared
+without sharing a passphrase. `js/core/recipients.js`, one ephemeral-static
+ECDH per recipient:
+
+```
+(e, E)         = a fresh P-256 keypair, per recipient per file
+Z              = ECDH(e, R)                          R = the recipient's public key
+wrap key/nonce = HKDF-SHA256(Z, fileSalt, "<wrap-version>|" ‖ E ‖ R)
+entry          = E, AES-256-GCM(wrap, fileKey, aad="<envelope>|recipient|<fileHash>")
+```
+
+| Setting | Value | Where |
+|---|---|---|
+| Curve | P-256 (ECDH) | `js/core/recipients.js` |
+| Recipient key | 65 bytes, uncompressed point, prefixed `oreo-recipient-v1:` | `RECIPIENT_PREFIX` |
+| Identity (private) | 97 bytes, scalar ‖ point, prefixed `oreo-identity-v1:` | `IDENTITY_PREFIX` |
+| Encoding | base64url, unpadded | `toBase64Url` in `js/core/bytes.js` |
+| Max recipients per file | 64 | `MANIFEST_LIMITS.maxRecipients` |
+| Entry on the wire | `{ ephemeral, ciphertext }` — 65 and 48 bytes | `header.recipients` |
+
+Generate a pair with `npm run recipient-key`: the identity goes to stdout, so it
+can be redirected into a file, and the recipient key to stderr so it stays on
+screen. Pass recipient keys to `packFile({ recipients: [...] })` and open with
+`openManifest(manifest, null, { identity })`.
+
+A file may carry a passphrase wrap, recipient wraps, or both; an encrypted
+manifest carrying neither is rejected by `validateManifestHeader`, because it
+describes a file nobody can open. The nonce is derived rather than stored, so
+two entries sharing an ephemeral key would be a reused (key, nonce) pair — the
+validator rejects a manifest containing one. Entries carry no recipient
+identifier, so opening a file tries each in turn; `docs/SECURITY.md` §2.7 says
+why that trade is the right way round.
+
 Every chunk gets its own key and nonce from HKDF, so each key is used exactly
 once and the nonce reuse that breaks AES-GCM cannot occur. Each chunk is sealed
 with additional authenticated data naming the envelope version, the file hash,
@@ -72,9 +107,10 @@ Selected per file and recorded in the manifest (`js/core/suites.js`):
 
 Split into a public header and an encrypted body (`js/core/manifest.js`):
 
-- **Header** — version, KDF parameters and salt, the wrapped file key, the file
-  salt, the plaintext file hash, the Merkle root, chunk size, chunk count and
-  file size. Readable by anyone; this is what the on-chain record commits to.
+- **Header** — version, KDF parameters and salt, the wrapped file key, any
+  recipient entries, the file salt, the plaintext file hash, the Merkle root,
+  chunk size, chunk count and file size. Readable by anyone; this is what the
+  on-chain record commits to.
 - **Body** — file name, MIME type, and the per-chunk table (index, storage
   location, plaintext hash, ciphertext hash, sizes). Encrypted under a key
   derived from the file key, because chunk locations and the file name are
