@@ -17,8 +17,10 @@ import {
   CODE_SIZE_LIMIT,
   ROOT,
   assertAddress,
+  assertContractAt,
   compileContract,
   confirmed,
+  connect,
   readChainCli,
 } from "../scripts/chain-tools.mjs";
 import { CHUNKED_VERIFICATION_ABI } from "../js/contract-abi.js";
@@ -136,4 +138,66 @@ test("both scripts exist, are executable, and refuse a bare invocation", () => {
     assert.match(run.stderr, /OREOCHAIN_CHAIN_RPC/);
     assert.match(run.stderr, /OREOCHAIN_DEPLOY_KEY/);
   }
+});
+
+/** Just enough web3 for connect() and the code check. */
+function fakeWeb3({ chainId = 11155111n, balance = 0n, code = "0x" } = {}) {
+  class Web3 {
+    constructor() {
+      this.eth = {
+        accounts: {
+          privateKeyToAccount: () => ({ address: "0x" + "77".repeat(20) }),
+          wallet: { add: () => {} },
+        },
+        getChainId: async () => chainId,
+        getBalance: async () => balance,
+        getCode: async () => code,
+      };
+    }
+  }
+  return { Web3 };
+}
+
+test("an unfunded address is reported, not thrown, so a dry run still runs", async () => {
+  /*
+   * connect() used to throw on a zero balance, before either script had
+   * printed a line. So the two things you go to a dry run for — which address
+   * to fund, and how much gas this will take — were unavailable until after
+   * you had funded it. The refusal belongs at the point of sending, which is
+   * where --confirm already is.
+   */
+  const chain = await connect({
+    rpcUrl: "http://127.0.0.1:1",
+    privateKey: KEY,
+    web3Module: fakeWeb3({ balance: 0n }),
+  });
+
+  assert.equal(chain.funded, false);
+  assert.equal(chain.balance, "0");
+  assert.equal(chain.chainId, 11155111);
+  assert.match(chain.account.address, /^0x[0-9a-f]{40}$/i);
+
+  const funded = await connect({
+    rpcUrl: "http://127.0.0.1:1",
+    privateKey: KEY,
+    web3Module: fakeWeb3({ balance: 10n ** 18n }),
+  });
+  assert.equal(funded.funded, true);
+});
+
+test("an address with no contract code names the mistake instead of failing to decode", async () => {
+  /*
+   * The wrong-network mistake the README calls one of the two most likely.
+   * The call returns empty bytes, web3 tries to decode them, and what reaches
+   * the operator is "Parameter decoding error" — which names neither the
+   * address, nor the network, nor what they did.
+   */
+  const { Web3 } = fakeWeb3({ code: "0x" });
+  await assert.rejects(
+    () => assertContractAt(new Web3(), "0x" + "cc".repeat(20), 11155111),
+    /no contract code at 0x/
+  );
+
+  const live = fakeWeb3({ code: "0x60806040" });
+  await assertContractAt(new live.Web3(), "0x" + "cc".repeat(20), 11155111);
 });

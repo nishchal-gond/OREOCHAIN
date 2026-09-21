@@ -14,7 +14,14 @@
  */
 
 import { CHUNKED_VERIFICATION_ABI } from "../js/contract-abi.js";
-import { assertAddress, confirmed, connect, readChainCli } from "./chain-tools.mjs";
+import {
+  assertAddress,
+  assertContractAt,
+  assertFunded,
+  confirmed,
+  connect,
+  readChainCli,
+} from "./chain-tools.mjs";
 
 async function main() {
   const args = process.argv.slice(2).filter((arg) => arg !== "--confirm");
@@ -37,6 +44,15 @@ async function main() {
   let chain;
   try {
     chain = await connect(config);
+  } catch (error) {
+    console.error(`Cannot authorise: ${error.message}`);
+    process.exit(1);
+  }
+
+  // Before any call, so the wrong-network mistake is named rather than
+  // surfacing as a decoding error on empty return bytes.
+  try {
+    await assertContractAt(chain.web3, config.contractAddress, chain.chainId);
   } catch (error) {
     console.error(`Cannot authorise: ${error.message}`);
     process.exit(1);
@@ -67,13 +83,28 @@ async function main() {
   console.log(`Owner:     ${chain.account.address}`);
   console.log(`Authorise: ${target} ("${info}")`);
 
+  const method = contract.methods.addExporter(target, info);
+
+  let gas = null;
+  try {
+    gas = await method.estimateGas({ from: chain.account.address });
+    console.log(`Gas:       ${gas} (about ${(Number(gas) * 2e-9).toFixed(4)} ETH at 2 gwei)`);
+  } catch (error) {
+    console.log(`Gas:       could not be estimated (${error.message})`);
+  }
+
   if (!confirmed()) {
     console.log("\nDry run. Re-run with --confirm to send. Nothing was sent.");
+    if (!chain.funded) {
+      console.log(`\n${chain.account.address} holds nothing on chain ${chain.chainId}.`);
+      console.log("Fund it with at least the gas above before re-running with --confirm.");
+    }
     return;
   }
 
-  const method = contract.methods.addExporter(target, info);
-  const gas = await method.estimateGas({ from: chain.account.address });
+  assertFunded(chain, "authorise");
+  if (gas === null) gas = await method.estimateGas({ from: chain.account.address });
+
   const receipt = await method.send({
     from: chain.account.address,
     gas: String(BigInt(Math.ceil(Number(gas) * 1.25))),

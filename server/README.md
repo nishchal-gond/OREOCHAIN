@@ -99,6 +99,9 @@ startup when no anchoring key is configured.
 | `OREOCHAIN_DB_PATH` | `./oreochain-proofs.log` | Recorded documents and anchored batches. `:memory:` for tests only. |
 | `OREOCHAIN_STORE_CHECK` | `full` | How hard to check the proof store at startup: `full` rebuilds every batch root, `structural` only cross-references, `off` skips it |
 | `OREOCHAIN_ALLOW_DAMAGED_STORE` | `false` | Start anyway when that check finds damage, serving the intact batches |
+
+| `OREOCHAIN_BATCH_MAX_SIZE` | `1000` | Documents waiting before a batch is flushed |
+| `OREOCHAIN_BATCH_MAX_AGE_MS` | `3600000` | How long the oldest pending document waits for one |
 | `OREOCHAIN_VERIFY_MANIFESTS` | `true` | Check a document against its manifest before signing a receipt for it |
 | `OREOCHAIN_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
 | `OREOCHAIN_SHUTDOWN_DELAY_MS` | `0` | Keep serving this long after SIGTERM, so a load balancer notices `/ready` first |
@@ -564,15 +567,54 @@ transactions you paid gas for.
 There is no local chain in this repository, so the first anchor you send goes
 to a real one. Send it to a testnet: deploy the contract there, fund the
 anchoring address from that network's faucet, authorise it, and run the worker
-against it end to end. Everything behaves identically — the same contract, the
-same confirmations, the same failure messages — and a mistake costs test
-currency.
+against it end to end. The contract, the confirmations and the failure messages
+are the same ones production will use, and a mistake costs test currency.
 
-Worth doing at least once before the mainnet or L2 deployment, because the two
-failures most likely to be waiting (the address was never authorised, or the
-contract address and the RPC endpoint are for different networks) are both
-caught by the worker's preflight on the first run rather than by a support
-request three weeks later.
+Worth doing at least once before the mainnet or L2 deployment. The two failures
+most likely to be waiting — the address was never authorised, or the contract
+address and the RPC endpoint are for different networks — are both caught by
+the worker's preflight on the first run rather than by a support request three
+weeks later. The third, which preflight cannot catch because it happens later,
+is the faucet drip running out underneath a worker that has been running for
+days.
+
+Two things behave differently on a testnet than they will in production, and
+neither is a fault:
+
+- A public testnet's fee market moves. `anchorBatch` is a small transaction,
+  but a spike can leave one sitting unmined until
+  `OREOCHAIN_ANCHOR_PENDING_TIMEOUT_MS` expires and the worker resubmits. That
+  is the path working, not failing.
+- Public RPC endpoints rate-limit. A tick reads `findBatch`, estimates gas and
+  sends, so a busy worker on a free endpoint will occasionally see a tick fail
+  and retry. It recovers on the next one; the contract, not the worker's
+  memory, is the authority on what is anchored.
+
+### What a deployment costs
+
+Measured on a 2026-09 run, as EIP-1559 type-2 transactions:
+
+| Step | Gas used |
+|---|---|
+| Deploy `ChunkedVerification` | 1,905,267 |
+| `addExporter` | 94,351 |
+| `anchorBatch`, batch of 1 | 185,937 |
+
+At 2 gwei that is roughly 0.0038 ETH to deploy, 0.0002 to authorise an
+exporter, and 0.0004 per anchor. A batch costs the same whether it carries one
+document or a thousand, which is the whole point of batching: the Merkle root
+is one word either way.
+
+**Fund two addresses, not one.** The deployer, which becomes the contract owner
+and is the only account that can authorise exporters afterwards, and the
+anchoring worker's address. On a testnet, 0.05 of that network's currency on
+each covers the deployment, the exporter authorisations and several hundred
+anchors with room for a fee spike. In production, size the worker's balance
+against your anchor rate and alert on it well before it empties — see below.
+
+Both scripts print the address they would spend from and a gas estimate on a
+dry run, before any balance is required, so `--confirm`-less is how you find
+out what to fund and with how much.
 
 ### How a tick works
 
@@ -595,6 +637,77 @@ means a reorg can leave a whole batch of receipts pointing at a transaction
 that no longer exists. Three is a floor for a fast chain; a public L1 wants
 more.
 
+### Keeping the anchoring address funded
+
+The worker checks its balance once, at startup, and refuses to start on zero.
+It does not check again, because a balance that was enough a moment ago can be
+spent by the transaction in flight, and a worker that stops to re-examine its
+own balance every tick anchors nothing while it does so.
+
+So an address that empties while the worker runs shows up as a send that fails,
+once per tick, with the endpoint's own words — `insufficient funds for gas *
+price + value` on a geth-family node:
+
+```
+{"level":"error","msg":"cannot anchor batch","root":"0x…","message":"Returned error: insufficient funds for gas * price + value"}
+```
+
+Nothing is lost while this lasts. The batch stays on the unanchored list, the
+receipts it covers stay unfulfilled promises, and the tick after the address is
+topped up anchors it. But nothing is anchored either, and no user sees a
+reason, so treat a repeating `cannot anchor batch` as a page, not a warning.
+`oreochain_documents_pending` climbing alongside it is the same story from the
+gateway's side.
+
+### When the endpoint is unreachable
+
+An RPC endpoint that is down, wrong, or refusing the worker's traffic fails at
+the gas estimate, before anything is signed or sent:
+
+```
+{"level":"error","msg":"cannot anchor batch","message":"request to http://…/ failed, reason: connect ECONNREFUSED"}
+```
+
+once per tick, for as long as it lasts. The worker keeps running and catches up
+when the endpoint returns; there is nothing to clean up and no transaction to
+worry about, because none was sent. If it never returns, point
+`OREOCHAIN_CHAIN_RPC` at another endpoint and restart — the worker recovers
+what it owes by asking the gateway and the contract, not by remembering.
+
+Note that the gateway reads the chain too, for `GET /api/proofs/verify/…`. With
+the endpoint gone that route answers **503 with `Retry-After`**, never a
+negative verdict. A verifier who is told "not anchored" acts on it; one who is
+told "ask again shortly" does not.
+
+### Nothing has been anchored yet
+
+The gateway builds a batch when there are enough documents waiting, or when the
+oldest has waited long enough. Until one of those is true,
+`GET /api/proofs/status` reports `"shouldFlush": false`, the worker's tick
+declines to build anything and says so once, and the documents sit pending.
+This is correct — a batch of one costs the same gas as a batch of a thousand —
+but on a gateway with little traffic it looks exactly like anchoring being
+broken.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OREOCHAIN_BATCH_MAX_SIZE` | `1000` | Documents that force a flush |
+| `OREOCHAIN_BATCH_MAX_AGE_MS` | `3600000` | How long the oldest pending document waits |
+
+Lower both for a first run or a demo, so you are not waiting an hour to see the
+thing work. Raise the age in production only as far as you are willing to make
+a user wait for their document to be anchored, and remember that the receipt
+they already hold promises it.
+
+To flush immediately without changing either, ask for it directly with an
+`OREOCHAIN_ANCHOR_API_KEYS` key:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ANCHOR_KEY" http://127.0.0.1:8787/api/proofs/batch
+```
+
+The worker anchors it on its next tick.
+
 ### When it goes wrong
 
 | Symptom | What it means | What to do |
@@ -605,6 +718,9 @@ more.
 | `a sent anchor never mined, resubmitting` | the transaction was dropped | usually gas; the contract rejects a duplicate anchor, so a resend is safe |
 | `anchored batch has no recoverable transaction hash` | the batch **is** anchored, but the RPC has pruned the log | `POST /api/proofs/anchored` with the hash by hand, from a block explorer |
 | `oreochain_documents_pending` climbing | nothing is being anchored | check the worker is running at all |
+| `cannot anchor batch` with `insufficient funds` | the anchoring address is empty | top it up; the next tick anchors the waiting batch |
+| `cannot anchor batch` with `ECONNREFUSED` or a timeout | the RPC endpoint is unreachable | nothing was sent; it catches up, or repoint `OREOCHAIN_CHAIN_RPC` and restart |
+| `documents are pending but not yet worth a batch` | neither flush threshold is met yet | see "Nothing has been anchored yet" above |
 
 Running two workers against one gateway is harmless but pointless: they race,
 the loser's transaction reverts with `AlreadyExists`, and gas is wasted. Run
