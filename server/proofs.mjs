@@ -163,6 +163,17 @@ export async function createProofService(options = {}) {
           (stats.pending >= batchMaxSize || now() - oldest.recordedAt >= batchMaxAgeMs),
         anchoredBatches: stats.batches,
         documents: stats.documents,
+
+        /*
+         * What shouldFlush is waiting for, said out loud.
+         *
+         * A quiet gateway receipts one document and then anchors nothing for
+         * an hour, which is the design working and reads from outside as the
+         * worker being broken. The worker polls this, so the thresholds are
+         * reported where whoever is watching the worker will see them.
+         */
+        batchMaxSize,
+        batchMaxAgeMs,
       };
     },
 

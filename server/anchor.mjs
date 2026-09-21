@@ -129,6 +129,10 @@ export function createAnchorWorker(options) {
 
   let running = false;
   let timer = null;
+
+  /** Whether the "pending but not yet worth a batch" line has been said. */
+  let waiting = false;
+
   const counts = { ticks: 0, submitted: 0, anchored: 0, failures: 0 };
 
   /**
@@ -237,7 +241,25 @@ export function createAnchorWorker(options) {
             log.info("batch built", { root: built.root, size: built.size });
             batches = [built];
           }
+        } else if (status.pending > 0 && !waiting) {
+          /*
+           * Said once per waiting spell, because the alternative is silence.
+           *
+           * A quiet gateway receipts a document and then anchors nothing until
+           * the age threshold expires an hour later. That is the design
+           * working, and from outside — no batches, no transactions, a worker
+           * ticking over — it is indistinguishable from anchoring being
+           * broken. The thresholds come from the gateway's own status, so this
+           * names the numbers actually in force rather than the defaults.
+           */
+          waiting = true;
+          log.info("documents are pending but not yet worth a batch", {
+            pending: status.pending,
+            batchMaxSize: status.batchMaxSize,
+            batchMaxAgeMs: status.batchMaxAgeMs,
+          });
         }
+        if (status.shouldFlush || status.pending === 0) waiting = false;
       } catch (error) {
         counts.failures++;
         log.error("cannot build a batch", { message: error.message });

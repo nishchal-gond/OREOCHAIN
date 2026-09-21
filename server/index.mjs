@@ -51,7 +51,13 @@ async function main() {
 
   let proofs;
   try {
-    proofs = await createProofService({ ...signingKey, dbPath: config.dbPath, verifier });
+    proofs = await createProofService({
+      ...signingKey,
+      dbPath: config.dbPath,
+      verifier,
+      batchMaxSize: config.batchMaxSize,
+      batchMaxAgeMs: config.batchMaxAgeMs,
+    });
   } catch (error) {
     /*
      * Most likely a second instance pointed at one proof store. That is a
