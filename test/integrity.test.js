@@ -303,6 +303,10 @@ test("refusing to start on a damaged store releases the lock on the way out", as
       OREOCHAIN_DB_PATH: dbPath,
       OREOCHAIN_API_KEYS: "k".repeat(48),
       OREOCHAIN_STORAGE: "memory",
+      // Otherwise the gateway refuses over the missing receipt key first and
+      // never reaches the store, which is a different refusal than the one
+      // this is about.
+      OREOCHAIN_EPHEMERAL_RECEIPT_KEY: "true",
       PORT: "18787",
     },
   });
@@ -323,6 +327,40 @@ test("refusing to start on a damaged store releases the lock on the way out", as
     existsSync(`${dbPath}.lock`),
     false,
     "a planned refusal must not leave the store locked behind it"
+  );
+});
+
+test("the missing-receipt-key refusal happens before the store is opened at all", async () => {
+  /*
+   * The refusal above releases a lock it holds. This one must never take it:
+   * the receipt key is checked first, so an instance that cannot sign exits
+   * without ever touching the store — no lock file, and nothing to clean up
+   * after. The two sit a few lines apart in server/index.mjs and the order
+   * between them is the whole difference, so it is worth pinning rather than
+   * leaving to whoever edits that function next.
+   */
+  const dbPath = path.join(tempDir(), "proofs.log");
+  await populate(dbPath, 2);
+
+  const started = spawnSync(process.execPath, [GATEWAY], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OREOCHAIN_DB_PATH: dbPath,
+      OREOCHAIN_API_KEYS: "k".repeat(48),
+      OREOCHAIN_STORAGE: "memory",
+      OREOCHAIN_EPHEMERAL_RECEIPT_KEY: "",
+      OREOCHAIN_RECEIPT_KEY: "",
+      PORT: "18788",
+    },
+  });
+
+  assert.equal(started.status, 1, started.stderr || started.stdout);
+  assert.match(started.stdout + started.stderr, /OREOCHAIN_RECEIPT_KEY is not set/);
+  assert.equal(
+    existsSync(`${dbPath}.lock`),
+    false,
+    "the gateway locked a store it had already decided not to serve"
   );
 });
 

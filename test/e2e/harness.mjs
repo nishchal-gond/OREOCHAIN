@@ -21,6 +21,9 @@ import { createHandler } from "../../server/gateway.mjs";
 import { createMemoryBackend } from "../../server/storage.mjs";
 import { createLogger } from "../../server/log.mjs";
 import { createProofService } from "../../server/proofs.mjs";
+import { createManifestVerifier } from "../../server/verify.mjs";
+
+import { Web3 } from "web3";
 
 import { startChain } from "./chain.mjs";
 
@@ -76,11 +79,26 @@ export async function startGateway(envOverrides = {}) {
     { warn: () => {} }
   );
 
-  const handler = createHandler(config, createMemoryBackend(), {
+  /*
+   * Wired the way server/index.mjs wires it, including the manifest verifier
+   * that `OREOCHAIN_VERIFY_MANIFESTS` turns on by default. That matters here:
+   * without it a receipt only repeats what the browser claimed, and the test
+   * would be checking a signature over an unchecked assertion. With it, the
+   * gateway fetches the manifest the browser just uploaded and confirms the
+   * document against it before signing — so the receipt this suite verifies
+   * is the one a deployment issues.
+   */
+  const backend = createMemoryBackend();
+  const proofs = await createProofService({
+    dbPath: ":memory:",
+    verifier: config.verifyManifests ? createManifestVerifier({ backend }) : null,
+  });
+
+  const handler = createHandler(config, backend, {
     logger: createLogger({ level: "silent" }),
     sweeper: false,
     staticRoot: ROOT,
-    proofs: await createProofService({ dbPath: ":memory:" }),
+    proofs,
   });
 
   const server = http.createServer((req, res) => {
@@ -94,6 +112,16 @@ export async function startGateway(envOverrides = {}) {
 
   return {
     origin: `http://127.0.0.1:${port}`,
+    /*
+     * The proof service itself, for the test to drive as the operator does.
+     *
+     * Anchoring is deliberately not something the browser can reach: those
+     * routes are scoped to the anchoring worker's key, and the worker holds a
+     * funded account this process has no business holding. So a test that
+     * needs a batch anchored builds it here, out of band, exactly where the
+     * worker would.
+     */
+    proofs,
     async stop() {
       await new Promise((resolve) => server.close(resolve));
     },
@@ -107,6 +135,41 @@ export async function startGateway(envOverrides = {}) {
  * sealed below it would pass while every real file failed to open.
  */
 export const TEST_KDF = "argon2id";
+
+/**
+ * Anchor a batch the way the operator's worker does.
+ *
+ * Three steps, in the order they really happen: the gateway builds a batch
+ * from what is pending, someone with a funded key sends anchorBatch(), and the
+ * transaction is reported back to the gateway so it can serve inclusion
+ * proofs that point at it. Nothing here goes through the browser, because
+ * nothing about anchoring is the browser's business.
+ */
+export async function anchorPending(gateway, chain) {
+  const batch = await gateway.proofs.buildPendingBatch();
+  if (!batch) return null;
+
+  const abiCoder = new Web3().eth.abi;
+  const txHash = await chain.request({
+    method: "eth_sendTransaction",
+    params: [
+      {
+        from: chain.accounts[0],
+        to: chain.address,
+        data: abiCoder.encodeFunctionCall(
+          chain.abi.find((entry) => entry.type === "function" && entry.name === "anchorBatch"),
+          [batch.root, batch.size, ""]
+        ),
+      },
+    ],
+  });
+
+  const receipt = await chain.request({ method: "eth_getTransactionReceipt", params: [txHash] });
+  const block = Number(receipt.blockNumber);
+
+  gateway.proofs.recordAnchor(batch.root, { txHash, block });
+  return { ...batch, txHash, block };
+}
 
 /**
  * Boot gateway, chain and browser.
@@ -171,7 +234,7 @@ export async function openApp(options = {}) {
    * injected provider and the config are set by an init script, which is a
    * property of the context.
    */
-  async function newContext({ wallet = true } = {}) {
+  async function newContext({ wallet = true, rpcUrl = true } = {}) {
     const context = await browser.newContext({ acceptDownloads: true });
 
     if (wallet) {
@@ -257,7 +320,7 @@ export async function openApp(options = {}) {
 
     await context.addInitScript((config) => {
       window.OREOCHAIN_CONFIG = config;
-    }, pageConfig({ rpcUrl: RPC_URL }));
+    }, pageConfig({ rpcUrl: rpcUrl ? RPC_URL : null }));
 
     return context;
   }
@@ -270,11 +333,27 @@ export async function openApp(options = {}) {
    * same-origin request failing is a real problem.
    */
   function isExpectedFailure(url) {
-    return !url.startsWith(gateway.origin) || url.endsWith("/js/config.js");
+    if (!url.startsWith(gateway.origin)) return true;
+    if (url.endsWith("/js/config.js")) return true;
+    /*
+     * A document with no inclusion proof yet is the ordinary state between
+     * upload and the next batch, and the endpoint says so with a 404. The page
+     * polls it on purpose; treating that as a page fault would make the
+     * default path untestable.
+     */
+    if (url.includes("/api/proofs/inclusion/")) return true;
+    /*
+     * The verify endpoint answers 404 for a document it has never seen and
+     * 503 when it could not reach the chain. Both are answers the page
+     * renders, not faults.
+     */
+    if (url.includes("/api/proofs/verify/")) return true;
+    return false;
   }
 
-  async function newPage({ wallet = true } = {}) {
-    const surface = wallet ? context : await newContext({ wallet: false });
+  async function newPage({ wallet = true, rpcUrl = true } = {}) {
+    const surface =
+      wallet && rpcUrl ? context : await newContext({ wallet, rpcUrl });
     const page = await surface.newPage();
     const problems = [];
 

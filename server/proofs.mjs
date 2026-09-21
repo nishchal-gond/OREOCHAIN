@@ -26,6 +26,7 @@ import {
 } from "../js/core/anchor.js";
 import { readSecret } from "./config.mjs";
 import { checkStore } from "./integrity.mjs";
+import { openKeyring } from "./keyring.mjs";
 import { openStore } from "./store.mjs";
 import {
   generateSigningKey,
@@ -64,6 +65,15 @@ export async function createProofService(options = {}) {
   }
 
   const kid = await keyId(publicKey);
+
+  /*
+   * Every public key that has ever signed here, so a receipt issued under a
+   * retired key still verifies. Without it, rotating the signing key — or
+   * restarting with an ephemeral one — turns every receipt already in
+   * someone's hands into something a holder cannot tell from a forgery.
+   */
+  const keyring = options.keyring || openKeyring({ path: options.keyringPath || ":memory:" });
+  keyring.use(kid, resolvedPublicJwk);
 
   const verifier = options.verifier || null;
   const store = options.store || openStore({ path: options.dbPath || ":memory:" });
@@ -119,6 +129,15 @@ export async function createProofService(options = {}) {
     kid,
     ephemeral,
     publicJwk: resolvedPublicJwk,
+
+    /** The public key for a kid, current or retired, or null. */
+    publicKeyFor(wanted) {
+      const key = keyring.find(wanted);
+      return key ? { kid: key.kid, publicJwk: key.publicJwk, retiredAt: key.retiredAt } : null;
+    },
+
+    /** Every key this gateway has ever signed with. */
+    keys: () => keyring.list(),
 
     /** Issue a receipt and record the document for the next anchor. */
     async record(document) {

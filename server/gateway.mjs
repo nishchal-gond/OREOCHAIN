@@ -30,6 +30,8 @@ import { authenticate } from "./auth.mjs";
 import { createLogger } from "./log.mjs";
 import { createMetrics } from "./metrics.mjs";
 import { createRateLimiter } from "./ratelimit.mjs";
+import { clientAddress } from "./clientaddr.mjs";
+import { createQuota } from "./quota.mjs";
 import { ABSENT, CONFIRMED, UNAVAILABLE } from "./confirm.mjs";
 import { verifyInBatch } from "../js/core/anchor.js";
 
@@ -60,6 +62,29 @@ const ANCHOR_PAGE = 100;
  * field or inject a newline into the JSON line it lands in.
  */
 const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]{1,64}$/;
+
+/**
+ * Why a request was refused, as one stable token a client can switch on.
+ *
+ * Status codes are not enough here, because two of them mean opposite things
+ * on the same route. A 429 from the token bucket means "slow down and try
+ * again"; a 429 from a per-window byte cap means "not until your window
+ * rolls". A 503 from load shedding means "try in a second"; a 503 from the
+ * daily budget means "not today". A client that cannot tell them apart either
+ * retries a spent budget in a loop, or tells a user the service is out of
+ * quota when two uploads happened to be in flight for a second.
+ *
+ * Prose is for people and changes freely. This does not.
+ */
+export const REFUSAL_CODES = Object.freeze({
+  RATE_LIMITED: "rate_limited",
+  BUSY: "busy",
+  CLIENT_QUOTA: "client_quota",
+  GATEWAY_BUDGET: "gateway_budget",
+  UNAUTHORIZED: "unauthorized",
+  FORBIDDEN: "forbidden",
+  BAD_REQUEST: "bad_request",
+});
 
 function requestId(req) {
   const supplied = req.headers["x-request-id"];
@@ -350,6 +375,45 @@ export function createHandler(config, backend, deps = {}) {
     ? path.resolve(deps.staticRoot || path.resolve(process.cwd()))
     : null;
 
+  /**
+   * The one place the gateway decides who a request came from.
+   *
+   * Every meter — the rate limiter, the per-client byte and object budgets —
+   * goes through this, so the proxy setting applies everywhere at once and no
+   * route can keep its own idea of who the client is.
+   */
+  const addressOf = (req) => {
+    /*
+     * A request arriving with X-Forwarded-For while no proxy is trusted means
+     * either someone is trying to forge an address — harmless, it is ignored
+     * — or there is a proxy in front of this process that the configuration
+     * does not know about, which silently collapses every visitor into one
+     * budget. The second is worth noticing, so it is counted, and said once.
+     */
+    if (config.trustedProxyHops === 0 && req.headers["x-forwarded-for"]) {
+      forwardedForIgnored++;
+      if (forwardedForIgnored === 1) {
+        logger.warn(
+          "a request arrived with X-Forwarded-For but OREOCHAIN_TRUSTED_PROXY_HOPS is 0, so " +
+            "it was ignored. If there is a proxy in front of this gateway, set it: every " +
+            "visitor is currently sharing one rate limit and one byte budget."
+        );
+      }
+    }
+    return clientAddress(req, config.trustedProxyHops);
+  };
+  let forwardedForIgnored = 0;
+
+  const quota =
+    deps.quota ||
+    createQuota({
+      clientBytes: config.clientBytesPerWindow,
+      clientObjects: config.clientObjectsPerWindow,
+      windowMs: config.quotaWindowMs,
+      dailyBytes: config.dailyBytes,
+      dailyObjects: config.dailyObjects,
+    });
+
   const logger = deps.logger || createLogger({ level: config.logLevel });
   const metrics = deps.metrics || createMetrics();
 
@@ -422,12 +486,58 @@ export function createHandler(config, backend, deps = {}) {
     );
   }
 
+  /*
+   * The spend, visible before it bites rather than diagnosed afterwards.
+   *
+   * oreochain_trusted_proxy_hops is here for one specific failure: a gateway
+   * behind a load balancer with hops left at 0 looks perfectly healthy and is
+   * one heavy visitor away from shutting everyone else out, because every
+   * visitor is sharing one budget. Reading 0 on a deployment that has a proxy
+   * in front of it is the warning.
+   */
+  metrics.gauge(
+    "oreochain_trusted_proxy_hops",
+    () => config.trustedProxyHops,
+    "Proxies trusted in X-Forwarded-For; 0 means caps are per connecting address"
+  );
+  metrics.gauge(
+    "oreochain_forwarded_for_ignored_total",
+    () => forwardedForIgnored,
+    "Requests carrying X-Forwarded-For while no proxy is trusted"
+  );
+  metrics.gauge(
+    "oreochain_daily_bytes_pinned",
+    () => quota.snapshot().dailyBytes,
+    "Bytes pinned today, service-wide"
+  );
+  metrics.gauge(
+    "oreochain_daily_bytes_budget",
+    () => quota.snapshot().dailyBytesBudget ?? 0,
+    "Daily byte ceiling; 0 means no limit is configured"
+  );
+  metrics.gauge(
+    "oreochain_daily_objects_pinned",
+    () => quota.snapshot().dailyObjects,
+    "Objects pinned today, service-wide"
+  );
+  metrics.gauge(
+    "oreochain_daily_objects_budget",
+    () => quota.snapshot().dailyObjectsBudget ?? 0,
+    "Daily object ceiling; 0 means no limit is configured"
+  );
+  metrics.gauge(
+    "oreochain_quota_clients",
+    () => quota.snapshot().clients,
+    "Clients with an open quota window"
+  );
+
   const METRIC_HELP = {
     oreochain_requests_total: "Requests completed, by route and status class",
     oreochain_auth_failures_total: "Requests rejected for a missing or invalid key",
     oreochain_rate_limited_total: "Requests rejected by the token bucket",
     oreochain_uploads_shed_total: "Uploads rejected because every slot was busy",
     oreochain_bytes_pinned_total: "Bytes accepted for pinning",
+    oreochain_quota_rejections_total: "Uploads refused by a byte or object ceiling",
   };
 
   // Idle rate-limit buckets are swept periodically so memory stays bounded.
@@ -436,6 +546,7 @@ export function createHandler(config, backend, deps = {}) {
       ? null
       : setInterval(() => {
           limiter.sweep();
+          quota.sweep();
           verifyLimiter.sweep();
         }, 600000);
   if (sweeper && typeof sweeper.unref === "function") sweeper.unref();
@@ -872,11 +983,48 @@ export function createHandler(config, backend, deps = {}) {
       // Public proof endpoints, before the auth gate.
       if (proofs && req.method === "GET") {
         if (PUBLIC_API.has(url.pathname)) {
+          /*
+           * With a kid, the key that signed some particular receipt — which
+           * may be one this gateway has since rotated away from. A receipt is
+           * portable and long-lived, so someone can come back a year later
+           * with one, and serving only the current key would make every
+           * receipt issued before a rotation fail to verify, with the same
+           * answer a forgery gets.
+           */
+          const wanted = url.searchParams.get("kid");
+          if (wanted) {
+            const key = proofs.publicKeyFor(wanted);
+            if (!key) {
+              sendJson(res, 404, {
+                /*
+                 * bad_request, deliberately, on a 404. The closed set has no
+                 * not-found code, and adding one would change a contract the
+                 * browser client compares against — for a refusal whose cause
+                 * really is the request: a kid this gateway has never held is
+                 * a kid the caller should not have asked for. The status code
+                 * already says not-found; the code says whose fault it is.
+                 */
+                code: REFUSAL_CODES.BAD_REQUEST,
+                error: "this gateway has never signed with that key",
+                kid: wanted,
+              });
+              return;
+            }
+            sendJson(res, 200, {
+              kid: key.kid,
+              publicJwk: key.publicJwk,
+              algorithm: "ECDSA-P256-SHA256",
+              retiredAt: key.retiredAt,
+            });
+            return;
+          }
+
           sendJson(res, 200, {
             kid: proofs.kid,
             publicJwk: proofs.publicJwk,
             algorithm: "ECDSA-P256-SHA256",
             ephemeral: proofs.ephemeral,
+            keys: proofs.keys(),
           });
           return;
         }
@@ -893,14 +1041,21 @@ export function createHandler(config, backend, deps = {}) {
          */
         const verify = VERIFY_ROUTE.exec(url.pathname);
         if (verify) {
-          const source =
-            req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "unknown";
-          const quota = verifyLimiter.take(`verify:${source}`);
-          if (!quota.allowed) {
-            res.setHeader("Retry-After", String(quota.retryAfterSeconds));
+          /*
+           * Through addressOf like every other meter, not off the socket.
+           * This route is unauthenticated, so the address is the only thing
+           * metering it — and behind a reverse proxy the socket address is
+           * the proxy's. Reading it directly would put every verifier in the
+           * world into one 30-per-minute bucket, and the first person to
+           * check a batch of certificates would lock out everyone else.
+           */
+          const allowance = verifyLimiter.take(`verify:${addressOf(req)}`);
+          if (!allowance.allowed) {
+            res.setHeader("Retry-After", String(allowance.retryAfterSeconds));
             sendJson(res, 429, {
+              code: REFUSAL_CODES.RATE_LIMITED,
               error: "rate limit exceeded",
-              retryAfterSeconds: quota.retryAfterSeconds,
+              retryAfterSeconds: allowance.retryAfterSeconds,
             });
             metrics.increment("oreochain_rate_limited_total", {});
             return;
@@ -929,7 +1084,7 @@ export function createHandler(config, backend, deps = {}) {
 
       if (isApi) {
         if (!corsOk) {
-          fail(403, { error: "origin not allowed" });
+          fail(403, { code: REFUSAL_CODES.FORBIDDEN, error: "origin not allowed" });
           return;
         }
 
@@ -937,7 +1092,7 @@ export function createHandler(config, backend, deps = {}) {
         if (!auth.ok) {
           // A uniform message avoids telling an attacker which part was wrong.
           res.setHeader("WWW-Authenticate", 'Bearer realm="oreochain"');
-          fail(401, { error: "unauthorized" });
+          fail(401, { code: REFUSAL_CODES.UNAUTHORIZED, error: "unauthorized" });
           log.warn("authentication failed", { reason: auth.reason, route });
           metrics.increment("oreochain_auth_failures_total", { reason: auth.reason });
           return;
@@ -946,15 +1101,14 @@ export function createHandler(config, backend, deps = {}) {
         // Anonymous callers share a key id, so bucket them by source address
         // instead — otherwise one client exhausts the bucket for everyone.
         const quotaKey =
-          auth.keyId === "anonymous"
-            ? `ip:${req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "unknown"}`
-            : auth.keyId;
-        const quota = limiter.take(quotaKey);
-        if (!quota.allowed) {
-          res.setHeader("Retry-After", String(quota.retryAfterSeconds));
+          auth.keyId === "anonymous" ? `ip:${addressOf(req)}` : auth.keyId;
+        const allowance = limiter.take(quotaKey);
+        if (!allowance.allowed) {
+          res.setHeader("Retry-After", String(allowance.retryAfterSeconds));
           fail(429, {
+            code: REFUSAL_CODES.RATE_LIMITED,
             error: "rate limit exceeded",
-            retryAfterSeconds: quota.retryAfterSeconds,
+            retryAfterSeconds: allowance.retryAfterSeconds,
           });
           log.warn("rate limited", { keyId: auth.keyId, route });
           metrics.increment("oreochain_rate_limited_total", {});
@@ -967,13 +1121,43 @@ export function createHandler(config, backend, deps = {}) {
             // retries — which the browser adapter does, with backoff — sees a
             // brief slowdown instead of a dead gateway.
             res.setHeader("Retry-After", "1");
-            fail(503, { error: "too many uploads in flight" }, { close: true });
+            fail(
+              503,
+              { code: REFUSAL_CODES.BUSY, error: "too many uploads in flight" },
+              { close: true }
+            );
             log.warn("upload shed, every slot busy", {
               keyId: auth.keyId,
               inFlight: inFlightUploads,
               slots: maxConcurrentUploads,
             });
             metrics.increment("oreochain_uploads_shed_total", {});
+            return;
+          }
+
+          /*
+           * What this client, and the service as a whole, may still spend.
+           * Checked against Content-Length before the body is read, because
+           * refusing 50 MB before reading it is the difference between a
+           * cheap rejection and an expensive one. A client that omits the
+           * header is charged after the fact instead.
+           */
+          const declared = Number(req.headers["content-length"]);
+          const spend = quota.check(quotaKey, Number.isFinite(declared) ? declared : 0);
+          if (!spend.allowed) {
+            res.setHeader("Retry-After", String(spend.retryAfterSeconds));
+            fail(spend.status, {
+              code: spend.code,
+              error: spend.message,
+              scope: spend.scope,
+              retryAfterSeconds: spend.retryAfterSeconds,
+            });
+            log.warn("quota exceeded", {
+              keyId: auth.keyId,
+              scope: spend.scope,
+              declaredBytes: Number.isFinite(declared) ? declared : null,
+            });
+            metrics.increment("oreochain_quota_rejections_total", { scope: spend.scope });
             return;
           }
 
@@ -984,11 +1168,15 @@ export function createHandler(config, backend, deps = {}) {
               timeoutMs: config.readTimeoutMs,
             });
             if (body.length === 0) {
-              fail(400, { error: "empty body" });
+              fail(400, { code: REFUSAL_CODES.BAD_REQUEST, error: "empty body" });
               return;
             }
 
             const cid = await backend.put(body, chunkName(req));
+            // Charged on what was stored, not on what was promised: a client
+            // may send less than it declared, and only what reached the
+            // pinning service costs anything.
+            quota.record(quotaKey, body.length);
             sendJson(res, 200, { cid });
             metrics.increment("oreochain_bytes_pinned_total", {}, body.length);
             log.info("pinned", {

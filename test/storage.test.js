@@ -38,6 +38,19 @@ function httpError(status) {
   return { ok: false, status, text: async () => `HTTP ${status}` };
 }
 
+/** A gateway refusal: a machine-readable code, prose for people, and a header. */
+function refusal(status, code, { retryAfter = null, error = "no" } = {}) {
+  const headers = new Map();
+  headers.set("Content-Type", "application/json");
+  if (retryAfter !== null) headers.set("Retry-After", String(retryAfter));
+  return {
+    ok: false,
+    status,
+    headers: { get: (name) => headers.get(name) ?? null },
+    text: async () => JSON.stringify({ code, error }),
+  };
+}
+
 // Retries are disabled in most tests so call counts stay meaningful.
 const NO_RETRY = { maxAttempts: 1 };
 
@@ -474,5 +487,172 @@ test("config selects the adapter", () => {
   assert.equal(
     createAdapterFromConfig({ storage: { provider: "pinata", mode: "backend" } }).readOnly,
     false
+  );
+});
+
+// ------------------------------------------------------- refusals and backoff
+
+test("a refusal code outranks the status when deciding to retry", async () => {
+  // Both are 429. One is "you went too fast" and one is "you have spent your
+  // allowance"; the status cannot tell them apart and the code can.
+  const wobble = { status: 429, code: "rate_limited" };
+  const cap = { status: 429, code: "client_quota" };
+
+  assert.equal(_internals.isRetryable(wobble), true);
+  assert.equal(_internals.isRetryable(cap), false);
+});
+
+test("the day's budget being spent is not retried, at any status", async () => {
+  assert.equal(_internals.isRetryable({ status: 503, code: "gateway_budget" }), false);
+});
+
+test("an unknown refusal code falls back to the status rather than guessing", () => {
+  assert.equal(_internals.isRetryable({ status: 503, code: "from_a_newer_gateway" }), true);
+  assert.equal(_internals.isRetryable({ status: 400, code: "from_a_newer_gateway" }), false);
+});
+
+test("a capped upload fails once instead of being retried three more times", async () => {
+  let calls = 0;
+  await withFetch(
+    async () => {
+      calls++;
+      return refusal(429, "client_quota", { error: "over your hourly allowance" });
+    },
+    async () => {
+      const adapter = createPinataAdapter({ mode: "backend", retry: { backoffBaseMs: 1 } });
+      await assert.rejects(() => adapter.put(new Uint8Array([1]), "chunk"), /client_quota/);
+    }
+  );
+  assert.equal(calls, 1);
+});
+
+test("the refusal code and the service's prose both reach the caller", async () => {
+  await withFetch(
+    async () => refusal(503, "gateway_budget", { error: "daily budget spent" }),
+    async () => {
+      const adapter = createPinataAdapter({ mode: "backend", retry: NO_RETRY });
+      const error = await adapter.put(new Uint8Array([1]), "chunk").catch((e) => e);
+      assert.equal(error.code, "gateway_budget");
+      // Kept for the log; the UI writes its own wording from the code.
+      assert.equal(error.serverMessage, "daily budget spent");
+    }
+  );
+});
+
+test("Retry-After sets the floor for the next attempt", async () => {
+  const delays = [];
+  let attempts = 0;
+
+  await withRetry(
+    async () => {
+      attempts++;
+      if (attempts === 1) {
+        const error = new Error("slow down");
+        error.status = 429;
+        error.code = "rate_limited";
+        error.retryAfterMs = 120;
+        throw error;
+      }
+      return "done";
+    },
+    { backoffBaseMs: 1, maxBackoffMs: 2, onRetry: (_, delay) => delays.push(delay) }
+  );
+
+  // Backoff alone would have waited at most 2ms here; the service asked for
+  // 120 and that wins, jitter on top.
+  assert.equal(delays.length, 1);
+  assert.ok(delays[0] >= 120, `waited ${delays[0]}ms, expected at least 120`);
+});
+
+test("a Retry-After longer than the cap is reported, not slept through", async () => {
+  let attempts = 0;
+  const error = await withRetry(
+    async () => {
+      attempts++;
+      const failure = new Error("come back later");
+      failure.status = 503;
+      failure.code = "busy";
+      failure.retryAfterMs = 600_000;
+      throw failure;
+    },
+    { backoffBaseMs: 1, maxRetryAfterMs: 30_000 }
+  ).catch((e) => e);
+
+  // Holding the tab for ten minutes is worse for the user than saying so.
+  assert.equal(attempts, 1);
+  assert.equal(error.retryAfterMs, 600_000);
+});
+
+test("Retry-After is read off the response, in either spelling", async () => {
+  await withFetch(
+    async () => refusal(503, "busy", { retryAfter: 7 }),
+    async () => {
+      const adapter = createPinataAdapter({ mode: "backend", retry: NO_RETRY });
+      const error = await adapter.put(new Uint8Array([1]), "chunk").catch((e) => e);
+      assert.equal(error.retryAfterMs, 7000);
+    }
+  );
+});
+
+test("a refusal body that is not JSON leaves the status error intact", async () => {
+  await withFetch(
+    async () => ({
+      ok: false,
+      status: 502,
+      headers: { get: (name) => (name === "Content-Type" ? "text/html" : null) },
+      text: async () => "<html>gateway timeout</html>",
+    }),
+    async () => {
+      const adapter = createPinataAdapter({ mode: "backend", retry: NO_RETRY });
+      const error = await adapter.put(new Uint8Array([1]), "chunk").catch((e) => e);
+      assert.equal(error.status, 502);
+      assert.equal(error.code, undefined);
+      assert.match(error.message, /HTTP 502/);
+    }
+  );
+});
+
+test("one chunk hitting a cap stops the others rather than piling on", async () => {
+  let started = 0;
+  const chunks = Array.from({ length: 12 }, (_, i) => ({ payload: new Uint8Array([i]) }));
+
+  const adapter = {
+    async put(bytes, name, { signal } = {}) {
+      started++;
+      if (signal && signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (signal && signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      const error = new Error("HTTP 503 (gateway_budget)");
+      error.status = 503;
+      error.code = "gateway_budget";
+      throw error;
+    },
+  };
+
+  const error = await putAll(adapter, chunks, { concurrency: 4 }).catch((e) => e);
+
+  // The first real refusal is what the user is told about, not the aborts it
+  // caused in its siblings.
+  assert.equal(error.code, "gateway_budget");
+  // Four were already in flight when the first one was refused; none of the
+  // remaining eight should have been sent to a service that said no.
+  assert.ok(started <= 4, `sent ${started} chunks after a hard refusal`);
+});
+
+test("a caller's abort still wins over an internal one", async () => {
+  const controller = new AbortController();
+  const chunks = Array.from({ length: 6 }, (_, i) => ({ payload: new Uint8Array([i]) }));
+
+  const adapter = {
+    async put() {
+      controller.abort();
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    },
+  };
+
+  await assert.rejects(
+    () => putAll(adapter, chunks, { concurrency: 2, signal: controller.signal }),
+    /abort/i
   );
 });
