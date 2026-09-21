@@ -30,9 +30,12 @@ import { authenticate } from "./auth.mjs";
 import { createLogger } from "./log.mjs";
 import { createMetrics } from "./metrics.mjs";
 import { createRateLimiter } from "./ratelimit.mjs";
+import { ABSENT, CONFIRMED, UNAVAILABLE } from "./confirm.mjs";
+import { verifyInBatch } from "../js/core/anchor.js";
 
 const CID_ROUTE = /^\/api\/storage\/([A-Za-z0-9_-]{1,512})$/;
 const INCLUSION_ROUTE = /^\/api\/proofs\/inclusion\/(0x[0-9a-fA-F]{64})$/;
+const VERIFY_ROUTE = /^\/api\/proofs\/verify\/(0x[0-9a-fA-F]{64})$/;
 
 /**
  * Endpoints that must work without a key. Verifying someone else's document is
@@ -325,6 +328,24 @@ export function createHandler(config, backend, deps = {}) {
     deps.limiter ||
     createRateLimiter({ perMinute: config.rateLimitPerMinute, burst: config.rateLimitBurst });
 
+  /*
+   * Public verification is the only unauthenticated route that does outside
+   * work — a chain read the operator pays for — so it gets its own, much
+   * tighter bucket, keyed by source address since there is no key to key it
+   * on. Sharing the upload limiter would mean either metering verification
+   * like an upload, which is far too generous, or metering uploads like
+   * verification, which would break them.
+   */
+  const verifyLimiter =
+    deps.verifyLimiter ||
+    createRateLimiter({
+      perMinute: config.verifyRateLimitPerMinute,
+      burst: config.verifyRateLimitBurst,
+    });
+
+  /** Read-only chain access, when the operator has configured it. */
+  const confirmer = deps.confirmer || null;
+
   const staticRoot = config.serveStatic
     ? path.resolve(deps.staticRoot || path.resolve(process.cwd()))
     : null;
@@ -386,8 +407,318 @@ export function createHandler(config, backend, deps = {}) {
   };
 
   // Idle rate-limit buckets are swept periodically so memory stays bounded.
-  const sweeper = deps.sweeper === false ? null : setInterval(() => limiter.sweep(), 600000);
+  const sweeper =
+    deps.sweeper === false
+      ? null
+      : setInterval(() => {
+          limiter.sweep();
+          verifyLimiter.sweep();
+        }, 600000);
   if (sweeper && typeof sweeper.unref === "function") sweeper.unref();
+
+  /**
+   * Answer "is this document anchored?" in terms a person can act on.
+   *
+   * There are two ways a document reaches the contract, and a verifier
+   * holding a certificate does not know which was used:
+   *
+   *  - **a batch anchor**: this gateway receipted the document, put it in a
+   *    batch, and the anchoring worker submitted that batch's root;
+   *  - **a registration**: the uploader's own wallet wrote one record for
+   *    this document, paying its own gas, with no receipt involved.
+   *
+   * Both are looked up, the answer says which applies, and it carries what an
+   * independent checker needs to redo the work without trusting this reply.
+   */
+  async function verifyDocument(fileHash) {
+    /*
+     * The gateway's own verdict is labelled as the gateway's own verdict.
+     *
+     * Asking this service "is this document verified?" and believing the
+     * answer reinstates exactly the party a signed receipt exists to bound.
+     * So the body leads with the materials — the receipt, the inclusion
+     * proof, the batch root, the transaction, the on-chain record — and the
+     * conclusion sits in one clearly named field that a caller is free to
+     * ignore and redo.
+     */
+    const answer = (httpStatus, claim, materials = {}) => ({
+      status: claim.status,
+      httpStatus,
+      body: {
+        fileHash,
+        ...materials,
+        gatewayClaim: claim,
+        howToCheck:
+          "Do not take gatewayClaim on trust. Verify the receipt's signature against the " +
+          "key at GET /api/proofs/key, recompute the inclusion proof against batch.root, " +
+          "and read findBatch(batch.root) or findDocument(fileHash) on the contract named " +
+          "in chainRead.",
+      },
+    });
+
+    const proof = await proofs.proofFor(fileHash);
+    const receipt = proofs.receiptFor(fileHash);
+
+    let batch = null;
+    const warnings = [];
+
+    if (proof) {
+      // Our own proof, against our own root. If this ever fails, the store
+      // and the tree disagree — a fault here, not an answer about the
+      // document.
+      const inclusion = await verifyInBatch(proof, proof.batchRoot);
+      if (!inclusion.valid) {
+        logger.error("a stored inclusion proof does not verify", {
+          fileHash,
+          batchRoot: proof.batchRoot,
+          reason: inclusion.reason,
+        });
+        return answer(500, {
+          verified: false,
+          status: "internal",
+          anchoredBy: [],
+          explain: "this gateway could not reproduce its own proof for that document",
+        });
+      }
+
+      batch = {
+        root: proof.batchRoot,
+        index: proof.index,
+        size: proof.batchSize ?? null,
+        document: proof.document,
+        proof: proof.proof,
+        inclusionValid: true,
+        recorded: proof.txHash ? { txHash: proof.txHash, block: proof.block } : null,
+        onChain: null,
+      };
+    }
+
+    if (!confirmer) {
+      if (!proof) {
+        return answer(404, {
+          verified: false,
+          status: "unknown",
+          anchoredBy: [],
+          explain:
+            "this gateway has no record of that document, and it is not configured to read " +
+            "the chain, so it cannot say whether the document is registered there",
+        });
+      }
+      return answer(
+        200,
+        {
+          verified: false,
+          status: "unchecked",
+          anchoredBy: [],
+          explain:
+            "the inclusion proof is valid, but this gateway is not configured to read the " +
+            "chain. Check batch.root against findBatch() on the contract yourself: the " +
+            "proof verifies against whatever root the contract holds.",
+        },
+        { receipt, batch, registration: null, chainRead: null }
+      );
+    }
+
+    const [anchor, registration] = await Promise.all([
+      batch ? confirmer.check(batch.root) : Promise.resolve(null),
+      confirmer.checkDocument(fileHash),
+    ]);
+
+    /*
+     * Never an answer about the document. Someone acting on a false "this is
+     * not anchored" is the worst thing this endpoint can produce, so a chain
+     * it could not reach says exactly that and asks to be asked again.
+     */
+    const unavailable = [anchor, registration].some((r) => r && r.state === UNAVAILABLE);
+    if (unavailable) {
+      return answer(
+        503,
+        {
+          verified: false,
+          status: "unavailable",
+          anchoredBy: [],
+          explain:
+            "this gateway could not reach the chain to check. This is not a statement that " +
+            "the document is unanchored.",
+        },
+        { receipt, batch, registration: null, chainRead: chainReadFrom(anchor, registration) }
+      );
+    }
+
+    const anchoredBy = [];
+
+    if (anchor && anchor.state === CONFIRMED) {
+      batch.onChain = {
+        block: anchor.block,
+        size: anchor.size,
+        txHash: anchor.txHash,
+        confirmations: anchor.confirmations,
+      };
+
+      /*
+       * The contract holding this root while disagreeing about how many
+       * documents it covers means the root was anchored by something that
+       * does not share this store's idea of the batch. The Merkle root would
+       * not match if the contents differed, so this is close to impossible —
+       * which is exactly why it is worth reporting rather than ignoring.
+       */
+      if (typeof batch.size === "number" && anchor.size !== batch.size) {
+        logger.error("the anchored batch size disagrees with the store", {
+          batchRoot: batch.root,
+          onChain: anchor.size,
+          stored: batch.size,
+        });
+        metrics.increment("oreochain_anchor_discrepancies_total", { kind: "size" });
+        warnings.push(
+          "the contract holds this batch root but says it covers a different number of " +
+            "documents than this gateway recorded"
+        );
+      } else {
+        anchoredBy.push("batch");
+      }
+    } else if (batch && batch.recorded) {
+      /*
+       * We recorded a transaction and the contract does not hold the root: a
+       * reorg, or an RPC pointed at a different network. An alarm, not a
+       * routine "not yet".
+       */
+      logger.error("a recorded anchor is not on the chain", {
+        batchRoot: batch.root,
+        txHash: batch.recorded.txHash,
+        block: batch.recorded.block,
+      });
+      metrics.increment("oreochain_anchor_discrepancies_total", { kind: "missing" });
+      warnings.push(
+        "this gateway recorded an anchoring transaction for this batch, but the contract " +
+          "does not hold that root. Do not treat this as unanchored until an operator has " +
+          "checked that transaction independently."
+      );
+    }
+
+    let registered = null;
+    if (registration && registration.state === CONFIRMED) {
+      registered = {
+        block: registration.block,
+        timestamp: registration.timestamp,
+        merkleRoot: registration.merkleRoot,
+        manifestCID: registration.manifestCID,
+        totalChunks: registration.totalChunks,
+        fileSize: registration.fileSize,
+        encrypted: registration.encrypted,
+        exporter: registration.exporter,
+        confirmations: registration.confirmations,
+      };
+
+      // Both paths describing the same file must describe the same file.
+      const receiptedRoot = proof && proof.document ? proof.document.merkleRoot : null;
+      if (receiptedRoot && receiptedRoot.toLowerCase() !== registration.merkleRoot) {
+        logger.error("the registered Merkle root disagrees with the receipted one", {
+          fileHash,
+          onChain: registration.merkleRoot,
+          receipted: receiptedRoot,
+        });
+        metrics.increment("oreochain_anchor_discrepancies_total", { kind: "root" });
+        warnings.push(
+          "the on-chain registration for this document names a different Merkle root than " +
+            "the one this gateway receipted"
+        );
+      } else {
+        anchoredBy.push("registration");
+      }
+    }
+
+    const materials = {
+      receipt,
+      batch,
+      registration: registered,
+      chainRead: chainReadFrom(anchor, registration),
+    };
+    const claim = { status: "", anchoredBy, verified: false };
+    if (warnings.length > 0) claim.warnings = warnings;
+
+    /*
+     * A disagreement outranks a confirmation, even when the other path checked
+     * out perfectly.
+     *
+     * If the chain says this document's Merkle root is one thing and this
+     * gateway receipted another, the two are not describing the same file, and
+     * "anchored" is not a useful thing to say about it — whichever path
+     * happened to verify. Reporting verified with a warning attached invites
+     * exactly the reading that matters least: the word, not the caveat.
+     */
+    if (warnings.length > 0) {
+      claim.status = "disputed";
+      claim.explain =
+        anchoredBy.length > 0
+          ? "what is on the chain disagrees with what this gateway recorded about this " +
+            "document, so it is not being called anchored even though " +
+            `${anchoredBy.join(" and ")} checked out. See warnings.`
+          : "this document could not be confirmed, and what is on the chain disagrees with " +
+            "what this gateway recorded. See warnings.";
+      return answer(200, claim, materials);
+    }
+
+    if (anchoredBy.length > 0) {
+      claim.verified = true;
+      claim.status = "verified";
+      claim.explain = explainVerified(anchoredBy, batch, registered);
+      return answer(200, claim, materials);
+    }
+
+    if (!proof) {
+      claim.status = "unknown";
+      claim.explain = "neither this gateway nor the contract has any record of that document";
+      return answer(404, claim, materials);
+    }
+
+    claim.status = "not-anchored";
+    claim.explain =
+      "the document is recorded here and its inclusion proof is valid, but the batch it " +
+      "belongs to has not been anchored on-chain yet, and it has no per-document " +
+      "registration either";
+    return answer(200, claim, materials);
+  }
+
+  /**
+   * Which contract, on which chain, the answer actually came from.
+   *
+   * Taken from the lookup itself rather than read separately, so the two
+   * halves of a response cannot disagree: a verifier told which chain was
+   * read, and an anchor that came from a different one, is worse off than a
+   * verifier told nothing.
+   */
+  function chainReadFrom(...results) {
+    for (const result of results) {
+      if (result && result.chainId) {
+        return { contract: result.contract, chainId: result.chainId };
+      }
+    }
+    // Reached only when nothing could be read at all; naming the contract we
+    // would have asked still tells a verifier where to look themselves.
+    return confirmer && confirmer.reader
+      ? { contract: confirmer.reader.contractAddress, chainId: null }
+      : null;
+  }
+
+  /** One sentence a person can read, for each way a document can be anchored. */
+  function explainVerified(anchoredBy, batch, registered) {
+    const parts = [];
+    if (anchoredBy.includes("batch")) {
+      parts.push(
+        `it is one of ${batch.onChain.size} documents in a batch whose root the contract ` +
+          `holds, anchored at block ${batch.onChain.block}` +
+          (batch.onChain.txHash ? ` in transaction ${batch.onChain.txHash}` : "") +
+          `, ${batch.onChain.confirmations} confirmation(s) deep`
+      );
+    }
+    if (anchoredBy.includes("registration")) {
+      parts.push(
+        `it is registered on-chain in its own right at block ${registered.block}, ` +
+          `${registered.confirmations} confirmation(s) deep`
+      );
+    }
+    return `This document is anchored: ${parts.join("; and ")}.`;
+  }
 
   return async function handle(req, res) {
     const started = Date.now();
@@ -523,6 +854,40 @@ export function createHandler(config, backend, deps = {}) {
             algorithm: "ECDSA-P256-SHA256",
             ephemeral: proofs.ephemeral,
           });
+          return;
+        }
+
+        /*
+         * The whole point of receipts, made checkable by someone with no
+         * account, no wallet and no RPC endpoint of their own. A court, an
+         * employer or a regulator holding a certificate can ask this and get
+         * an answer, rather than being told to go and read a blockchain.
+         *
+         * It is also the only public route that does outside work per call,
+         * so it is metered, cached, and careful about the difference between
+         * "no" and "I could not check".
+         */
+        const verify = VERIFY_ROUTE.exec(url.pathname);
+        if (verify) {
+          const source =
+            req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "unknown";
+          const quota = verifyLimiter.take(`verify:${source}`);
+          if (!quota.allowed) {
+            res.setHeader("Retry-After", String(quota.retryAfterSeconds));
+            sendJson(res, 429, {
+              error: "rate limit exceeded",
+              retryAfterSeconds: quota.retryAfterSeconds,
+            });
+            metrics.increment("oreochain_rate_limited_total", {});
+            return;
+          }
+
+          const answer = await verifyDocument(verify[1]);
+          if (answer.status === "unavailable") {
+            res.setHeader("Retry-After", "30");
+          }
+          sendJson(res, answer.httpStatus, answer.body);
+          metrics.increment("oreochain_verifications_total", { status: answer.body.status });
           return;
         }
 
