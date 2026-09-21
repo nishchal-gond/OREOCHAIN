@@ -372,6 +372,7 @@ A verifier does not know which was used, so both are looked up.
 {
   "fileHash": "0x…",
   "receipt":  { … },          // the signed receipt, or null
+  "receiptKey": { "kid": "…", "publicJwk": { … }, "retiredAt": null },
   "batch":    { "root": "0x…", "index": 3, "size": 12, "document": {…},
                 "proof": [ … ],
                 "recorded": { "txHash": "0x…", "block": 21000000 },
@@ -384,6 +385,15 @@ A verifier does not know which was used, so both are looked up.
   "howToCheck": "…"
 }
 ```
+
+`receiptKey` is the public key the receipt names by `kid`, served alongside it
+so checking the signature costs no second request. It is the key that
+*signed this receipt*, not whichever key is current: a receipt issued before a
+rotation comes back with the retired key that verifies it, and `retiredAt` says
+when it stopped signing. A `kid` this gateway has never held comes back as
+`publicJwk: null` rather than as a missing field — that is a fact about this
+gateway, not a verdict on the receipt, and it is checkable against
+`GET /api/proofs/key?kid=`, which is the authority on it.
 
 **The verdict is fenced off on purpose.** Asking this service "is this
 verified?" and believing the answer reinstates exactly the party a signed
