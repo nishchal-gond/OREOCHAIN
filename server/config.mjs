@@ -117,6 +117,8 @@ export function loadConfig(env = process.env) {
     }
   }
 
+  const chain = readChainAccess(env);
+
   const pinataJwt = readSecret(env, "PINATA_JWT");
   if (!pinataJwt && env.OREOCHAIN_STORAGE !== "memory") {
     throw new Error(
@@ -245,6 +247,30 @@ export function loadConfig(env = process.env) {
     quotaWindowMs: readInt(env, "OREOCHAIN_QUOTA_WINDOW_MS", 3_600_000, { min: 1000 }),
     dailyBytes: readOptionalInt(env, "OREOCHAIN_DAILY_BYTES"),
     dailyObjects: readOptionalInt(env, "OREOCHAIN_DAILY_OBJECTS"),
+
+    /**
+     * Read-only chain access, so the gateway can answer "is this document
+     * really anchored?" itself.
+     *
+     * Optional: without it the verification endpoint says it cannot check
+     * rather than guessing. Both settings or neither — half of this pair is a
+     * mistake, and the half that is set would silently do nothing.
+     */
+    chainRpc: chain.rpcUrl,
+    contractAddress: chain.contractAddress,
+
+    /**
+     * How long a confirmed anchor is trusted from cache. It is immutable
+     * short of a reorg, and this is the only thing standing between a public
+     * endpoint and the operator's RPC bill.
+     */
+    chainCacheMs: readInt(env, "OREOCHAIN_CHAIN_CACHE_MS", 3_600_000, { min: 1000 }),
+
+    /** Public verification is metered separately, and much more tightly. */
+    verifyRateLimitPerMinute: readInt(env, "OREOCHAIN_VERIFY_RATE_LIMIT_PER_MINUTE", 30, {
+      min: 1,
+    }),
+    verifyRateLimitBurst: readInt(env, "OREOCHAIN_VERIFY_RATE_LIMIT_BURST", 10, { min: 1 }),
   };
 }
 
@@ -275,6 +301,27 @@ const SUGGESTED_CAPS = {
   OREOCHAIN_DAILY_BYTES: { value: 5_368_709_120, as: "5 GiB a day, everyone together" },
   OREOCHAIN_DAILY_OBJECTS: { value: 20_000, as: "20000 objects a day, everyone together" },
 };
+
+
+/** The read-only chain pair, validated together because half of it is useless. */
+function readChainAccess(env) {
+  const rpcUrl = env.OREOCHAIN_CHAIN_RPC || null;
+  const contractAddress = env.OREOCHAIN_CONTRACT_ADDRESS || null;
+
+  if (Boolean(rpcUrl) !== Boolean(contractAddress)) {
+    throw new Error(
+      "OREOCHAIN_CHAIN_RPC and OREOCHAIN_CONTRACT_ADDRESS must be set together — with only " +
+        "one of them the gateway cannot read the chain, and would answer verification " +
+        "requests as though it had never been configured at all"
+    );
+  }
+  if (contractAddress && !/^0x[0-9a-fA-F]{40}$/.test(contractAddress)) {
+    throw new Error(
+      `OREOCHAIN_CONTRACT_ADDRESS must be a 20-byte hex address, got "${contractAddress}"`
+    );
+  }
+  return { rpcUrl, contractAddress };
+}
 
 /**
  * Configuration for the anchoring worker (server/anchor-worker.mjs).

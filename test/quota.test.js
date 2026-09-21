@@ -19,6 +19,7 @@ import { createLogger } from "../server/log.mjs";
 import { createMemoryBackend } from "../server/storage.mjs";
 import { CLIENT_BYTES, DAILY_BYTES, createQuota } from "../server/quota.mjs";
 import { REFUSAL_CODES } from "../server/gateway.mjs";
+import { createProofService } from "../server/proofs.mjs";
 
 const silent = createLogger({ level: "silent" });
 
@@ -256,6 +257,10 @@ async function startGateway(env = {}, deps = {}) {
 const pin = (gw, body, headers = {}) =>
   fetch(`${gw.url}/api/storage/pin`, { method: "POST", body, headers });
 
+const FILE_HASH = "0x" + "7".repeat(64);
+const verify = (gw, headers = {}) =>
+  fetch(`${gw.url}/api/proofs/verify/${FILE_HASH}`, { headers });
+
 test("an upload past the ceiling is refused before its body is read", async () => {
   const gw = await startGateway({ OREOCHAIN_CLIENT_BYTES_PER_WINDOW: "100" });
   try {
@@ -327,6 +332,71 @@ test("behind a trusted proxy, visitors are metered apart; without one, together"
     );
   } finally {
     await separate.stop();
+  }
+});
+
+test("the proxy setting reaches the verify limiter too, not just the pin route", async () => {
+  /*
+   * The public verification route is unauthenticated, so the address is the
+   * only thing metering it — and it reads that address through the same
+   * resolver as everything else rather than off the socket. It did not
+   * always: behind a load balancer that put every verifier in the world into
+   * one 30-per-minute bucket, and the first person checking a batch of
+   * certificates locked out everyone else.
+   */
+  const tight = {
+    OREOCHAIN_VERIFY_RATE_LIMIT_PER_MINUTE: "1",
+    OREOCHAIN_VERIFY_RATE_LIMIT_BURST: "1",
+  };
+  // The route only exists when there is a proof service behind it; what it
+  // answers does not matter here, only whether the meter let it through.
+  const withProofs = async () => ({ proofs: await createProofService({}) });
+
+  const shared = await startGateway(tight, await withProofs());
+  try {
+    assert.notEqual((await verify(shared, { "x-forwarded-for": "1.1.1.1" })).status, 429);
+    assert.equal(
+      (await verify(shared, { "x-forwarded-for": "2.2.2.2" })).status,
+      429,
+      "with no proxy trusted, both arrived from the same socket and share one bucket"
+    );
+  } finally {
+    await shared.stop();
+  }
+
+  const separate = await startGateway(
+    { ...tight, OREOCHAIN_TRUSTED_PROXY_HOPS: "1" },
+    await withProofs()
+  );
+  try {
+    assert.notEqual((await verify(separate, { "x-forwarded-for": "1.1.1.1" })).status, 429);
+    assert.notEqual(
+      (await verify(separate, { "x-forwarded-for": "2.2.2.2" })).status,
+      429,
+      "a second verifier has their own allowance"
+    );
+    assert.equal(
+      (await verify(separate, { "x-forwarded-for": "1.1.1.1" })).status,
+      429,
+      "and the first is still held to theirs"
+    );
+  } finally {
+    await separate.stop();
+  }
+});
+
+test("a verify refusal carries the same refusal code as every other meter", async () => {
+  const gw = await startGateway(
+    { OREOCHAIN_VERIFY_RATE_LIMIT_PER_MINUTE: "1", OREOCHAIN_VERIFY_RATE_LIMIT_BURST: "1" },
+    { proofs: await createProofService({}) }
+  );
+  try {
+    await verify(gw);
+    const refused = await verify(gw);
+    assert.equal(refused.status, 429);
+    assert.equal((await refused.json()).code, REFUSAL_CODES.RATE_LIMITED);
+  } finally {
+    await gw.stop();
   }
 });
 

@@ -27,6 +27,110 @@ function toNumber(value) {
 }
 
 /**
+ * Read-only access to the contract. No key, so nothing here can spend.
+ *
+ * Split out from the client below because the gateway needs exactly this and
+ * must never hold an anchoring key: it is the process that parses public
+ * uploads. A reader it cannot send transactions with is a reader that cannot
+ * be turned into one by a bug.
+ *
+ * @param {object} options
+ * @param {string} options.rpcUrl
+ * @param {string} options.contractAddress
+ * @param {object} options.log
+ * @param {object} [options.web3Module] injected in tests
+ */
+export async function createChainReader(options) {
+  const { rpcUrl, contractAddress, log } = options;
+
+  const { Web3 } = options.web3Module || (await import("web3"));
+  const web3 = new Web3(rpcUrl);
+  const contract = new web3.eth.Contract(CHUNKED_VERIFICATION_ABI, contractAddress);
+
+  return {
+    web3,
+    contract,
+    contractAddress,
+
+    /**
+     * Asked every time rather than memoised.
+     *
+     * A running process is not entitled to assume its RPC endpoint still
+     * points where it did: a DNS change, a failover, or an operator editing a
+     * URL can put a different network behind the same address. Caching this
+     * meant the answer could name one chain while the data came from another,
+     * which is worse than either being wrong on its own.
+     */
+    chainId: async () => toNumber(await web3.eth.getChainId()),
+
+    blockNumber: async () => toNumber(await web3.eth.getBlockNumber()),
+
+    /**
+     * Where a batch root landed, or null if the contract has never seen it.
+     *
+     * The transaction hash is not stored on-chain — the contract keeps the
+     * block, not the transaction — so it is recovered from the BatchAnchored
+     * event in that one block. An RPC that has pruned logs that far back
+     * returns null for it, which callers report rather than retry.
+     */
+    async findBatch(root) {
+      const found = await contract.methods.findBatch(root).call();
+      const block = toNumber(found.blockNumber ?? found[0]);
+      if (block === 0) return null;
+
+      let txHash = null;
+      try {
+        const events = await contract.getPastEvents("BatchAnchored", {
+          filter: { batchRoot: root },
+          fromBlock: block,
+          toBlock: block,
+        });
+        txHash = events[0]?.transactionHash ?? null;
+      } catch (error) {
+        log.warn("could not read the BatchAnchored log", {
+          root,
+          block,
+          message: error.message,
+        });
+      }
+
+      return { block, size: toNumber(found.size ?? found[2]), txHash };
+    },
+
+    /**
+     * A per-document registration, or null.
+     *
+     * The other way a document reaches this contract: one record per
+     * document, written from the uploader's own wallet, with no batch and no
+     * receipt. A verifier asking about a document does not know or care which
+     * path put it there, so both are looked up.
+     *
+     * Note what null cannot tell you: revokeDocument() deletes the record
+     * outright, so a revoked document and one that was never registered are
+     * the same read. The DocumentRevoked event is the audit trail for that,
+     * and finding it means a log scan over an unbounded range, which this
+     * deliberately does not do on a public request.
+     */
+    async findDocument(fileHash) {
+      const found = await contract.methods.findDocument(fileHash).call();
+      const block = toNumber(found.blockNumber ?? found[0]);
+      if (block === 0) return null;
+
+      return {
+        block,
+        timestamp: toNumber(found.timestamp ?? found[1]),
+        merkleRoot: String(found.merkleRoot ?? found[2]).toLowerCase(),
+        manifestCID: found.manifestCID ?? found[3],
+        totalChunks: toNumber(found.totalChunks ?? found[4]),
+        fileSize: toNumber(found.fileSize ?? found[5]),
+        encrypted: Boolean(found.encrypted ?? found[6]),
+        exporter: found.exporter ?? found[7],
+      };
+    },
+  };
+}
+
+/**
  * @param {object} options
  * @param {string} options.rpcUrl
  * @param {string} options.contractAddress
@@ -38,13 +142,12 @@ function toNumber(value) {
 export async function createChainClient(options) {
   const { rpcUrl, contractAddress, privateKey, log, gasLimitPadding = 1.25 } = options;
 
-  const { Web3 } = options.web3Module || (await import("web3"));
-  const web3 = new Web3(rpcUrl);
+  const reader = await createChainReader(options);
+  const { web3, contract } = reader;
 
   const account = web3.eth.accounts.privateKeyToAccount(privateKey);
   web3.eth.accounts.wallet.add(account);
 
-  const contract = new web3.eth.Contract(CHUNKED_VERIFICATION_ABI, contractAddress);
   // Without this a revert surfaces as an opaque failure; with it the custom
   // error the contract declares comes back, which is the difference between
   // "transaction failed" and "NotAuthorisedExporter".
@@ -52,6 +155,8 @@ export async function createChainClient(options) {
 
   return {
     address: account.address,
+    blockNumber: reader.blockNumber,
+    findBatch: reader.findBatch,
 
     /**
      * Refuse to run against a chain where every anchor would revert.
@@ -92,40 +197,6 @@ export async function createChainClient(options) {
         address: account.address,
         balanceWei: String(balance),
       };
-    },
-
-    blockNumber: async () => toNumber(await web3.eth.getBlockNumber()),
-
-    /**
-     * Where a batch root landed, or null if the contract has never seen it.
-     *
-     * The transaction hash is not stored on-chain — the contract keeps the
-     * block, not the transaction — so it is recovered from the BatchAnchored
-     * event in that one block. An RPC that has pruned logs that far back
-     * returns null for it, which the worker reports rather than retries.
-     */
-    async findBatch(root) {
-      const found = await contract.methods.findBatch(root).call();
-      const block = toNumber(found.blockNumber ?? found[0]);
-      if (block === 0) return null;
-
-      let txHash = null;
-      try {
-        const events = await contract.getPastEvents("BatchAnchored", {
-          filter: { batchRoot: root },
-          fromBlock: block,
-          toBlock: block,
-        });
-        txHash = events[0]?.transactionHash ?? null;
-      } catch (error) {
-        log.warn("could not read the BatchAnchored log", {
-          root,
-          block,
-          message: error.message,
-        });
-      }
-
-      return { block, size: toNumber(found.size ?? found[2]), txHash };
     },
 
     /**
