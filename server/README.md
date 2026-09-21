@@ -78,6 +78,11 @@ startup when no anchoring key is configured.
 | `OREOCHAIN_VERIFY_MANIFESTS` | `true` | Check a document against its manifest before signing a receipt for it |
 | `OREOCHAIN_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
 | `OREOCHAIN_SHUTDOWN_DELAY_MS` | `0` | Keep serving this long after SIGTERM, so a load balancer notices `/ready` first |
+| `OREOCHAIN_CHAIN_RPC` | — | Read-only RPC endpoint, so the gateway can confirm anchors itself |
+| `OREOCHAIN_CONTRACT_ADDRESS` | — | The deployed contract to read. Set with the line above or not at all. |
+| `OREOCHAIN_CHAIN_CACHE_MS` | `3600000` | How long a confirmed anchor is trusted from cache |
+| `OREOCHAIN_VERIFY_RATE_LIMIT_PER_MINUTE` | `30` | Public verification, per source address |
+| `OREOCHAIN_VERIFY_RATE_LIMIT_BURST` | `10` | Burst for the same |
 
 The anchoring worker is a second process with its own settings — see
 [The anchoring worker](#the-anchoring-worker).
@@ -300,6 +305,104 @@ deployment.
 ### `GET /api/proofs/key` — public
 
 The receipt verification key, as a JWK, plus its key id.
+
+### `GET /api/proofs/verify/<fileHash>` — public
+
+Everything needed to establish whether a document is anchored, for someone
+with no account here, no wallet and no RPC endpoint of their own.
+
+It answers for **both** ways a document reaches the contract: a batch anchor,
+where this gateway receipted the document and the worker anchored its batch's
+root, and a per-document registration written from the uploader's own wallet.
+A verifier does not know which was used, so both are looked up.
+
+```json
+{
+  "fileHash": "0x…",
+  "receipt":  { … },          // the signed receipt, or null
+  "batch":    { "root": "0x…", "index": 3, "size": 12, "document": {…},
+                "proof": [ … ],
+                "recorded": { "txHash": "0x…", "block": 21000000 },
+                "onChain":  { "block": 21000000, "size": 12,
+                              "txHash": "0x…", "confirmations": 45 } },
+  "registration": { "block": …, "merkleRoot": "0x…", "exporter": "0x…", … },
+  "chainRead":    { "contract": "0x…", "chainId": 1 },
+  "gatewayClaim": { "verified": true, "status": "verified",
+                    "anchoredBy": ["batch"], "explain": "…" },
+  "howToCheck": "…"
+}
+```
+
+**The verdict is fenced off on purpose.** Asking this service "is this
+verified?" and believing the answer reinstates exactly the party a signed
+receipt exists to bound. So the body leads with the materials — the receipt,
+the inclusion proof, the root, the transaction, the on-chain record, and which
+contract on which chain was read — and the conclusion sits in `gatewayClaim`,
+which a caller is free to ignore and redo. A browser client should verify
+locally with `verifyReceipt` and `verifyInBatch` from `js/core/` and use this
+endpoint only as a chain read it cannot perform itself.
+
+`gatewayClaim.status` is one of:
+
+| Status | Meaning | HTTP |
+|---|---|---|
+| `verified` | anchored, by whichever paths `anchoredBy` names | 200 |
+| `not-anchored` | recorded here, proof valid, not yet on-chain by either path | 200 |
+| `disputed` | the chain disagrees with this gateway; see `warnings` | 200 |
+| `unchecked` | this gateway is not configured to read the chain | 200 |
+| `unavailable` | the chain could not be reached — **not** a negative | 503 + `Retry-After` |
+| `unknown` | neither this gateway nor the contract has heard of it | 404 |
+| `internal` | this gateway could not reproduce its own proof | 500 |
+
+`unavailable` exists because a regulator acting on a false "this document is
+not anchored" is the worst thing this endpoint can produce. An RPC that is
+down says so; it never becomes a "no".
+
+**Cost control.** This is the only public route that does outside work per
+call, so: a confirmed anchor is cached for `OREOCHAIN_CHAIN_CACHE_MS` (an
+anchored root does not change), "not there" is cached briefly so a scan of
+unknown hashes is not a scan of your RPC quota, "could not check" is never
+cached, and the route has its own rate limit — `OREOCHAIN_VERIFY_RATE_LIMIT_*`,
+much tighter than uploads and keyed by source address. A per-document
+registration is cached for a shorter time than an anchor, because unlike an
+anchor a registration can be revoked.
+
+**What a null registration cannot tell you:** `revokeDocument` deletes the
+record outright, so a revoked document and one that was never registered read
+identically. The `DocumentRevoked` event is the audit trail for that, and
+finding it means a log scan over an unbounded block range, which this
+deliberately does not do on an unauthenticated request.
+
+### When the chain disagrees: what this gateway does
+
+Decided deliberately, because the alternatives are all worse:
+
+- **A read never writes.** If the contract does not hold a root this gateway
+  recorded as anchored, the store is not corrected, marked or cleared. The
+  recorded transaction is the only evidence linking that batch to a
+  submission, and a read path that can erase it turns a misconfigured RPC into
+  data loss.
+- **It is reported as `disputed`, never as "not anchored".** The response
+  carries both what was recorded and the fact that the contract does not show
+  it, the gateway logs it at `error`, and
+  `oreochain_anchor_discrepancies_total` increments. Alert on that metric.
+- **Nothing re-anchors automatically.** The worker anchors what the gateway
+  lists as unanchored, and a batch with a recorded anchor is not on that list.
+  Letting a read-path disagreement feed the write path would mean an RPC
+  pointed at the wrong network could spend money anchoring batches that are
+  already anchored.
+
+So recovering from a genuine reorg is a deliberate human act:
+
+1. Confirm the transaction is really gone — a second RPC endpoint, or a block
+   explorer. An RPC serving a fork, or pointed at the wrong network, looks
+   exactly like a reorg from here.
+2. Stop the gateway.
+3. Remove that batch's anchor line from the store. It is append-only JSON
+   lines, so this is the single line reading
+   `{"t":"anchor","root":"0x…",…}` for that root.
+4. Start the gateway. The batch is unanchored again, and the worker anchors it
+   on its next tick.
 
 ### `GET /api/proofs/inclusion/<fileHash>` — public
 

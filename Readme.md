@@ -279,6 +279,7 @@ logged.
 | `POST /api/proofs/anchored` | anchor key | Record where a root landed on-chain |
 | `GET /api/proofs/key` | **public** | Receipt verification key |
 | `GET /api/proofs/inclusion/<hash>` | **public** | Inclusion proof for a document |
+| `GET /api/proofs/verify/<hash>` | **public** | Receipt, proof and the on-chain record, for checking without a wallet |
 | `GET /ready` | — | Readiness; 503 while draining |
 | `GET /metrics` | key | Prometheus exposition |
 
@@ -317,7 +318,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              463 tests, including EVM cross-checks
+test/                              476 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -362,7 +363,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test           # 463 tests
+npm test           # 476 tests
 npm run test:e2e   # the pages driven in a real browser (needs Playwright)
 npm run abi        # regenerate js/contract-abi.js after changing the contract
 npm run vendor     # regenerate js/vendor/noble after changing a @noble version
