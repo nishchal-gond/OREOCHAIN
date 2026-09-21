@@ -21,6 +21,9 @@ import { createHandler } from "../../server/gateway.mjs";
 import { createMemoryBackend } from "../../server/storage.mjs";
 import { createLogger } from "../../server/log.mjs";
 import { createProofService } from "../../server/proofs.mjs";
+import { openKeyring } from "../../server/keyring.mjs";
+import { openStore } from "../../server/store.mjs";
+import { generateSigningKey } from "../../js/core/receipt.js";
 import { createManifestVerifier } from "../../server/verify.mjs";
 
 import { Web3 } from "web3";
@@ -89,17 +92,38 @@ export async function startGateway(envOverrides = {}) {
    * is the one a deployment issues.
    */
   const backend = createMemoryBackend();
-  const proofs = await createProofService({
-    dbPath: ":memory:",
-    verifier: config.verifyManifests ? createManifestVerifier({ backend }) : null,
+
+  /*
+   * The store and the keyring outlive the proof service that uses them, which
+   * is what makes a rotation expressible here. A deployment rotates by
+   * restarting the gateway with a new OREOCHAIN_RECEIPT_KEY: the proofs and
+   * the ring on disk are the same afterwards, only the signing key is
+   * different. Holding both out here and building a second service over them
+   * is that, without the restart — and without the restart the browser's
+   * origin does not move, which a test that has a page open needs.
+   */
+  const keyring = openKeyring({ path: ":memory:" });
+  const store = openStore({ path: ":memory:" });
+  const verifier = config.verifyManifests ? createManifestVerifier({ backend }) : null;
+
+  const signingKey = await generateSigningKey();
+  let proofs = await createProofService({
+    keyring,
+    store,
+    verifier,
+    privateJwk: signingKey.exported.privateJwk,
+    publicJwk: signingKey.exported.publicJwk,
   });
 
-  const handler = createHandler(config, backend, {
-    logger: createLogger({ level: "silent" }),
-    sweeper: false,
-    staticRoot: ROOT,
-    proofs,
-  });
+  const buildHandler = () =>
+    createHandler(config, backend, {
+      logger: createLogger({ level: "silent" }),
+      sweeper: false,
+      staticRoot: ROOT,
+      proofs,
+    });
+
+  let handler = buildHandler();
 
   const server = http.createServer((req, res) => {
     handler(req, res).catch(() => {
@@ -121,7 +145,37 @@ export async function startGateway(envOverrides = {}) {
      * needs a batch anchored builds it here, out of band, exactly where the
      * worker would.
      */
-    proofs,
+    get proofs() {
+      return proofs;
+    },
+
+    /**
+     * Rotate the receipt signing key, as an operator does.
+     *
+     * Returns the kid that was signing before and the one signing now, so a
+     * test can assert on the receipt it already holds rather than on whatever
+     * the gateway happens to report afterwards.
+     *
+     * The point of the exercise is what does *not* change: the keyring keeps
+     * the old public key and marks it retired, so a receipt issued before the
+     * rotation still verifies. A gateway that lost it would turn every
+     * receipt already in someone's hands into something indistinguishable
+     * from a forgery, which is the failure this is here to catch.
+     */
+    async rotateReceiptKey() {
+      const before = proofs.kid;
+      const next = await generateSigningKey();
+      proofs = await createProofService({
+        keyring,
+        store,
+        verifier,
+        privateJwk: next.exported.privateJwk,
+        publicJwk: next.exported.publicJwk,
+      });
+      handler = buildHandler();
+      return { before, after: proofs.kid };
+    },
+
     async stop() {
       await new Promise((resolve) => server.close(resolve));
     },
