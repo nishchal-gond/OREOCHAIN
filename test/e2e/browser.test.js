@@ -510,3 +510,71 @@ test("with no RPC, a document the gateway never saw is still unregistered", { sk
   await waitForNote(page, /does not match/);
   assert.match(await page.locator("#doc-status").innerText(), /Not registered/);
 });
+
+test(
+  "a gateway that sends markup gets it rendered as text, not as markup",
+  { skip: missing },
+  async () => {
+    const { file } = await sampleFile("hostile-gateway.pdf", 20_000);
+
+    const uploader = await open("/upload.html", { wallet: false });
+    await upload({ page: uploader.page, file, mode: "gateway" });
+    await anchorPending(app.gateway, app.chain);
+
+    const { page, problems } = await open("/verify.html", { wallet: false, rpcUrl: false });
+
+    /*
+     * The gateway's own answer, with one field replaced on the way past.
+     *
+     * `onChain.txHash` is the right field to poison: the page prints it, and
+     * unlike the CID and the roots it is covered by no proof, so the gateway
+     * is simply believed about it. Everything else is left alone so the
+     * response still verifies and the page reaches the branch that renders.
+     *
+     * The premise is not far-fetched. The gateway is the same origin that
+     * serves these pages, so a compromised one has other things to do — but
+     * a deployment behind someone else's reverse proxy, or reading a store
+     * an attacker has written to, is a gateway sending strings nobody chose.
+     */
+    const PAYLOAD = '0xdead"><img src=x id="pwned"><span class="text-danger">enter passphrase';
+    await page.route("**/api/proofs/verify/**", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      // The gateway names the transaction in `onChain` when it has read the
+      // chain and in `recorded` when it has only been told; poison whichever
+      // it sent, since the page prints either.
+      for (const key of ["onChain", "recorded"]) {
+        if (body && body.batch && body.batch[key]) body.batch[key].txHash = PAYLOAD;
+      }
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+    });
+
+    await page.waitForFunction(() => typeof window.verifyRegistration === "function", {
+      timeout: 30_000,
+    });
+    await page.setInputFiles("#doc-file", file);
+    await page.click("#chunked-verify-button");
+
+    await waitForNote(page, /Checked here/);
+
+    // The only assertion that matters: nothing the gateway sent became part
+    // of the document. A passphrase box drawn by the service is the attack
+    // this page has to survive, and it does not need script to be one.
+    assert.equal(await page.locator("#pwned").count(), 0, "gateway markup became an element");
+    assert.equal(
+      await page.locator("#exporter-address img").count(),
+      0,
+      "gateway markup became an element inside the field that printed it"
+    );
+
+    // And it is still shown, as the text it is, so the user can see what the
+    // service actually said.
+    assert.match(await page.locator("#exporter-address").innerText(), /0xdead/);
+
+    assert.deepEqual(problems, []);
+  }
+);
