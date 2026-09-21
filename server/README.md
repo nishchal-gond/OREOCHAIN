@@ -72,6 +72,7 @@ startup when no anchoring key is configured.
 | `OREOCHAIN_ALLOWED_ORIGINS` | none | Browser origins permitted via CORS. `*` is refused. |
 | `OREOCHAIN_READ_TIMEOUT_MS` | `30000` | Request body timeout |
 | `OREOCHAIN_UPSTREAM_TIMEOUT_MS` | `60000` | Timeout for calls to the pinning service |
+| `OREOCHAIN_IPFS_GATEWAYS` | three public ones | Comma-separated IPFS gateways to read a CID back through, tried in order |
 | `OREOCHAIN_SERVE_STATIC` | `false` | Also serve the frontend, so there is no CORS at all |
 | `OREOCHAIN_RECEIPT_KEY` | — | Receipt signing key pair. Generate with `node scripts/generate-receipt-key.mjs`. |
 | `OREOCHAIN_DB_PATH` | `./oreochain-proofs.log` | Recorded documents and anchored batches. `:memory:` for tests only. |

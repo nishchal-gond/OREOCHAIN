@@ -233,3 +233,84 @@ jobs:
           echo "$out" | grep -q 'cannot anchor against this chain' \
             || { echo "::error::preflight did not run"; echo "$out"; exit 1; }
           echo "Worker starts, validates, and refuses cleanly."
+
+      # Everything above drives the image with `docker run` and a handful of
+      # environment variables, which is not how the README tells anyone to
+      # deploy this. docker-compose.yml and .env.example are the documented
+      # path, and they are the two files that rot silently: a setting the code
+      # now refuses to start without, a default that drifted, a secret the
+      # compose file no longer mounts. Nothing else in CI reads either file.
+      #
+      # So this follows the runbook from a fresh checkout, as an operator
+      # would, and then asks the deployment the questions an operator asks.
+      - name: The runbook works from a fresh clone
+        run: |
+          set -euo pipefail
+
+          # Step one of the README, verbatim.
+          cp .env.example .env
+          mkdir -p secrets
+
+          # The three credentials it tells you to supply. The pinning one is a
+          # placeholder because CI has no Pinata account; the storage backend
+          # is switched to memory for the same reason, which is the one
+          # deviation from the documented path and is itself documented in
+          # .env.example under "local testing".
+          key=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+          anchor=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+          printf %s "placeholder-not-a-real-pinata-jwt" > secrets/pinata_jwt
+          node scripts/generate-receipt-key.mjs > secrets/receipt_key
+
+          # Filled in place rather than appended, so this does not depend on
+          # which duplicate definition compose happens to prefer.
+          sed -i "s|^OREOCHAIN_API_KEYS=.*|OREOCHAIN_API_KEYS=$key,$anchor|" .env
+          sed -i "s|^OREOCHAIN_ANCHOR_API_KEYS=.*|OREOCHAIN_ANCHOR_API_KEYS=$anchor|" .env
+          echo "OREOCHAIN_STORAGE=memory" >> .env
+
+          grep -q "^OREOCHAIN_API_KEYS=$key" .env \
+            || { echo "::error::.env.example no longer has an OREOCHAIN_API_KEYS line to fill in"; exit 1; }
+
+          echo "::group::compose up"
+          docker compose up -d --build
+          echo "::endgroup::"
+
+          # The whole user path: pack, pin, receipt, verify the receipt against
+          # the published key, restore the bytes, batch, and check the
+          # inclusion proof against the batch root. Run from the checkout
+          # rather than inside the container, so it also exercises reaching the
+          # service across the published port.
+          if ! node scripts/smoke.mjs --url http://127.0.0.1:8787 --key "$key" --anchor-key "$anchor"; then
+            echo "::error::the deployed gateway failed the smoke test"
+            docker compose logs --no-color gateway
+            exit 1
+          fi
+
+          # The documented backup: a plain copy taken while the service runs,
+          # checked before it would ever be needed. This is the step that
+          # proves a restore is recoverable rather than assumed.
+          docker compose cp gateway:/data/oreochain-proofs.log ./restored-proofs.log
+          node scripts/verify-store.mjs ./restored-proofs.log \
+            || { echo "::error::a backup taken from a live gateway does not verify"; exit 1; }
+
+          # And the check the gateway itself runs, against its own live store,
+          # inside the image — which also proves scripts/ ships in it.
+          docker compose exec -T gateway node scripts/verify-store.mjs /data/oreochain-proofs.log \
+            || { echo "::error::the live store does not verify inside the container"; exit 1; }
+
+          echo "::group::gateway log"
+          docker compose logs --no-color gateway
+          echo "::endgroup::"
+
+      - name: Compose stops the way the runbook says it does
+        if: always()
+        run: |
+          set -uo pipefail
+          # stop_grace_period in the compose file has to be longer than the
+          # shutdown delay, or the drain is killed halfway and the whole point
+          # of it is lost. A non-zero exit code here is what that looks like.
+          docker compose stop
+          code=$(docker compose ps -a --format '{{.ExitCode}}' 2>/dev/null | head -1)
+          docker compose down -v
+          test "${code:-0}" = "0" \
+            || { echo "::error::the gateway did not exit cleanly under compose (exit $code)"; exit 1; }
+          echo "Stopped cleanly."
