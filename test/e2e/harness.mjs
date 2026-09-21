@@ -234,7 +234,7 @@ export async function openApp(options = {}) {
    * injected provider and the config are set by an init script, which is a
    * property of the context.
    */
-  async function newContext({ wallet = true } = {}) {
+  async function newContext({ wallet = true, rpcUrl = true } = {}) {
     const context = await browser.newContext({ acceptDownloads: true });
 
     if (wallet) {
@@ -320,7 +320,7 @@ export async function openApp(options = {}) {
 
     await context.addInitScript((config) => {
       window.OREOCHAIN_CONFIG = config;
-    }, pageConfig({ rpcUrl: RPC_URL }));
+    }, pageConfig({ rpcUrl: rpcUrl ? RPC_URL : null }));
 
     return context;
   }
@@ -342,11 +342,18 @@ export async function openApp(options = {}) {
      * default path untestable.
      */
     if (url.includes("/api/proofs/inclusion/")) return true;
+    /*
+     * The verify endpoint answers 404 for a document it has never seen and
+     * 503 when it could not reach the chain. Both are answers the page
+     * renders, not faults.
+     */
+    if (url.includes("/api/proofs/verify/")) return true;
     return false;
   }
 
-  async function newPage({ wallet = true } = {}) {
-    const surface = wallet ? context : await newContext({ wallet: false });
+  async function newPage({ wallet = true, rpcUrl = true } = {}) {
+    const surface =
+      wallet && rpcUrl ? context : await newContext({ wallet, rpcUrl });
     const page = await surface.newPage();
     const problems = [];
 

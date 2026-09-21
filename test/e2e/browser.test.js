@@ -457,3 +457,56 @@ test("a file that was never uploaded is still reported as unregistered", { skip:
   await waitForNote(page, /does not match/);
   assert.match(await page.locator("#doc-status").innerText(), /Not registered/);
 });
+
+test("with no RPC configured, the page says what it could and could not check", { skip: missing }, async () => {
+  const { file } = await sampleFile("no-rpc-anywhere.pdf", 40_000);
+
+  const uploader = await open("/upload.html", { wallet: false });
+  await upload({ page: uploader.page, file, mode: "gateway" });
+  await anchorPending(app.gateway, app.chain);
+
+  /*
+   * A deployment with no wallet and no `contract.rpcUrl`. The page cannot
+   * read the chain at all, so it falls back to the gateway's verify endpoint
+   * — and the thing being tested is that it does not launder the gateway's
+   * "verified" into a verification of its own.
+   */
+  const { page, problems } = await open("/verify.html", { wallet: false, rpcUrl: false });
+  await page.waitForFunction(() => typeof window.verifyRegistration === "function", {
+    timeout: 30_000,
+  });
+  await page.setInputFiles("#doc-file", file);
+  await page.click("#chunked-verify-button");
+
+  const note = await waitForNote(page, /Checked here/);
+
+  assert.match(note, /Checked here/, "it should name what it did check");
+  assert.match(note, /Not checked here: whether that batch is on the chain/);
+  assert.match(note, /did not confirm/, "the gateway's claim must not read as a confirmation");
+  assert.match(note, /contract\.rpcUrl/, "and it should say how to get a real verification");
+
+  const status = await page.locator("#doc-status").innerText();
+  assert.match(status, /Partly checked/);
+  assert.doesNotMatch(
+    status,
+    /^Anchored on-chain/,
+    "a gateway saying verified must never render as a chain-confirmed anchor"
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("with no RPC, a document the gateway never saw is still unregistered", { skip: missing }, async () => {
+  const { file } = await sampleFile("no-rpc-unknown.pdf", 20_000);
+
+  const { page } = await open("/verify.html", { wallet: false, rpcUrl: false });
+  await page.waitForFunction(() => typeof window.verifyRegistration === "function", {
+    timeout: 30_000,
+  });
+  await page.setInputFiles("#doc-file", file);
+  await page.click("#chunked-verify-button");
+
+  // The fallback must not soften a plain "no" into an "unable to say".
+  await waitForNote(page, /does not match/);
+  assert.match(await page.locator("#doc-status").innerText(), /Not registered/);
+});

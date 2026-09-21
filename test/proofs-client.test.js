@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 
 import { buildBatch, proveInBatch } from "../js/core/anchor.js";
 import { generateSigningKey, issueReceipt, keyId } from "../js/core/receipt.js";
-import { checkAnchor, checkReceipt, createProofClient } from "../js/storage/proofs.js";
+import {
+  checkAnchor,
+  checkReceipt,
+  checkVerifyResponse,
+  createProofClient,
+} from "../js/storage/proofs.js";
 
 /** Swap in a fake fetch for the duration of one call. */
 async function withFetch(impl, fn) {
@@ -293,4 +298,202 @@ test("no inclusion proof is pending, not disputed", async () => {
   const result = await checkAnchor(receipt, null, null);
   assert.equal(result.anchored, false);
   assert.notEqual(result.disputed, true);
+});
+
+// -------------------------------------------- verifying with no chain access
+
+/**
+ * A verify response as the gateway builds it, with the materials that matter
+ * and the gateway's own verdict alongside them.
+ */
+async function verifyBody({ receipt, batch, claim, chainRead = null }) {
+  return {
+    fileHash: DOCUMENT.fileHash,
+    receipt: receipt ?? null,
+    batch: batch ?? null,
+    registration: null,
+    chainRead,
+    gatewayClaim: claim,
+    howToCheck: "Do not take gatewayClaim on trust…",
+  };
+}
+
+/**
+ * The `batch` material exactly as server/gateway.mjs builds it.
+ *
+ * Deliberately not the inclusion endpoint's shape, which is what an earlier
+ * version of this fixture used: that one carries a top-level fileHash and
+ * this one does not, so a client that verified the object as it arrived
+ * passed every test here and failed against the real gateway.
+ */
+async function anchoredBatch(document = DOCUMENT) {
+  const batch = await buildBatch([document]);
+  const inclusion = await proveInBatch(batch, document.fileHash);
+  return {
+    root: inclusion.batchRoot,
+    index: inclusion.index,
+    size: 1,
+    document: inclusion.document,
+    proof: inclusion.proof,
+    inclusionValid: true,
+    recorded: { txHash: `0x${"cd".repeat(32)}`, block: 4242 },
+    onChain: { block: 4242, size: 1, txHash: `0x${"cd".repeat(32)}`, confirmations: 12 },
+  };
+}
+
+test("a gateway claiming verified never yields a confirmed chain read", async () => {
+  const { kid, key, receipt } = await issue();
+  const body = await verifyBody({
+    receipt,
+    batch: await anchoredBatch(),
+    claim: { status: "verified", verified: true, anchoredBy: ["batch"], explain: "it is anchored" },
+  });
+
+  await withFetch(
+    async () => json({ kid, publicJwk: key.exported.publicJwk }),
+    async () => {
+      const result = await checkVerifyResponse(body, createProofClient());
+
+      // The whole point. Everything checkable checked out, and the one fact
+      // that needs a chain read is still not established, because nothing
+      // here read a chain.
+      assert.equal(result.receipt.valid, true);
+      assert.equal(result.inclusion.valid, true);
+      assert.equal(result.consistent, true);
+      assert.equal(result.chainConfirmed, false);
+
+      // The transaction is carried as a pointer for a person, flagged as
+      // unconfirmed rather than passed off as a verification.
+      assert.equal(result.anchor.txHash, `0x${"cd".repeat(32)}`);
+      assert.equal(result.anchor.claimedOnly, true);
+    }
+  );
+});
+
+test("the inline public key is used when the response carries one", async () => {
+  const { key, receipt } = await issue();
+  const body = await verifyBody({
+    receipt,
+    batch: await anchoredBatch(),
+    claim: { status: "verified", verified: true, anchoredBy: ["batch"] },
+  });
+  body.publicJwk = key.exported.publicJwk;
+
+  await withFetch(
+    async () => {
+      throw new Error("the keyring should not have been called");
+    },
+    async () => {
+      const result = await checkVerifyResponse(body, createProofClient());
+      assert.equal(result.receipt.valid, true);
+    }
+  );
+});
+
+test("a tampered receipt in a verify response fails locally", async () => {
+  const { kid, key, receipt } = await issue();
+  const body = await verifyBody({
+    receipt: { ...receipt, statement: { ...receipt.statement, fileSize: 999 } },
+    batch: await anchoredBatch(),
+    claim: { status: "verified", verified: true, anchoredBy: ["batch"] },
+  });
+
+  await withFetch(
+    async () => json({ kid, publicJwk: key.exported.publicJwk }),
+    async () => {
+      const result = await checkVerifyResponse(body, createProofClient());
+      // The gateway said verified. The signature says otherwise, and the
+      // signature is the one that was checked here.
+      assert.equal(result.receipt.valid, false);
+      assert.equal(result.chainConfirmed, false);
+    }
+  );
+});
+
+test("a receipt and a batch describing different documents are caught", async () => {
+  const { kid, key, receipt } = await issue({ ...DOCUMENT, manifestCID: "bafyPromised" });
+  const body = await verifyBody({
+    receipt,
+    batch: await anchoredBatch({ ...DOCUMENT, manifestCID: "bafyActuallyAnchored" }),
+    claim: { status: "verified", verified: true, anchoredBy: ["batch"] },
+  });
+
+  await withFetch(
+    async () => json({ kid, publicJwk: key.exported.publicJwk }),
+    async () => {
+      const result = await checkVerifyResponse(body, createProofClient());
+      assert.equal(result.consistent, false);
+      assert.match(result.warnings.join(" "), /manifestCID differs/);
+    }
+  );
+});
+
+test("the gateway's warnings are carried through, not dropped", async () => {
+  const body = await verifyBody({
+    batch: null,
+    claim: {
+      status: "disputed",
+      verified: false,
+      anchoredBy: [],
+      warnings: ["this gateway recorded an anchoring transaction but the contract has no root"],
+    },
+  });
+
+  const result = await checkVerifyResponse(body, createProofClient());
+  assert.equal(result.gatewayStatus, "disputed");
+  assert.match(result.warnings[0], /no root/);
+});
+
+test("a chain the gateway could not reach is a state, not a failed lookup", async () => {
+  await withFetch(
+    async () =>
+      json(
+        {
+          fileHash: DOCUMENT.fileHash,
+          receipt: null,
+          batch: null,
+          gatewayClaim: { status: "unavailable", verified: false, anchoredBy: [] },
+        },
+        503
+      ),
+    async () => {
+      const body = await createProofClient().verify(DOCUMENT.fileHash);
+      // A 503 here means the gateway could not read the chain. Throwing would
+      // make the page render an error; reporting "not anchored" would be a
+      // lie. It is neither.
+      assert.equal(body.gatewayClaim.status, "unavailable");
+
+      const result = await checkVerifyResponse(body, createProofClient());
+      assert.equal(result.gatewayStatus, "unavailable");
+      assert.equal(result.chainConfirmed, false);
+    }
+  );
+});
+
+test("no record of the document comes back as unknown, not an error", async () => {
+  await withFetch(
+    async () =>
+      json(
+        { fileHash: DOCUMENT.fileHash, gatewayClaim: { status: "unknown", verified: false } },
+        404
+      ),
+    async () => {
+      const body = await createProofClient().verify(DOCUMENT.fileHash);
+      assert.equal(body.gatewayClaim.status, "unknown");
+    }
+  );
+});
+
+test("a verify lookup validates the file hash before it reaches the network", async () => {
+  await withFetch(
+    async () => {
+      throw new Error("should not have been called");
+    },
+    async () => {
+      await assert.rejects(
+        () => createProofClient().verify("0xnot-a-hash"),
+        /32-byte hex/
+      );
+    }
+  );
 });

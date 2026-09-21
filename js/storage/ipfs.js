@@ -136,7 +136,13 @@ export async function withRetry(operation, options = {}) {
 }
 
 /**
- * Read a refusal's machine-readable code off a failed response.
+ * Read a failed response's JSON body, for the refusal code and for anything
+ * else the caller can use.
+ *
+ * Not every useful 4xx or 5xx is a refusal. The proof endpoints answer 404
+ * with "no record of that document" and 503 with "the gateway could not reach
+ * the chain", and both carry a full body the caller wants — so the parsed
+ * body comes back whether or not it has a `code`.
  *
  * Best-effort by design: a gateway that fell over behind a proxy answers HTML,
  * and a body that cannot be read must not replace the status error with a
@@ -153,7 +159,7 @@ async function readRefusal(response) {
       return null;
     }
     const body = JSON.parse(text);
-    return body && typeof body.code === "string" ? body : null;
+    return body && typeof body === "object" ? body : null;
   } catch {
     return null;
   }
@@ -185,13 +191,20 @@ async function timedFetch(url, init = {}, { signal, timeoutMs } = {}) {
       const retryAfterMs = parseRetryAfter(header);
       if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
 
-      const refusal = await readRefusal(response);
-      if (refusal) {
-        error.code = refusal.code;
-        // Kept for the log, never shown: the gateway's prose is for operators
-        // and may be reworded, so the UI writes its own from the code.
-        error.serverMessage = typeof refusal.error === "string" ? refusal.error : undefined;
-        error.message = `HTTP ${response.status} (${refusal.code})`;
+      const parsed = await readRefusal(response);
+      if (parsed) {
+        // The whole body, for an endpoint whose 404 or 503 is an answer rather
+        // than a refusal and carries materials the caller needs.
+        error.refusalBody = parsed;
+
+        if (typeof parsed.code === "string") {
+          error.code = parsed.code;
+          // Kept for the log, never shown: the gateway's prose is for
+          // operators and may be reworded, so the UI writes its own from the
+          // code.
+          error.serverMessage = typeof parsed.error === "string" ? parsed.error : undefined;
+          error.message = `HTTP ${response.status} (${parsed.code})`;
+        }
       }
       throw error;
     }
