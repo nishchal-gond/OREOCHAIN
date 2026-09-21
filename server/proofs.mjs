@@ -67,6 +67,7 @@ export async function createProofService(options = {}) {
 
   const verifier = options.verifier || null;
   const store = options.store || openStore({ path: options.dbPath || ":memory:" });
+  let lastIntegrity = null;
   const batchMaxSize = options.batchMaxSize ?? 1000;
   const batchMaxAgeMs = options.batchMaxAgeMs ?? 3600000;
   const now = options.now || (() => Date.now());
@@ -285,8 +286,21 @@ export async function createProofService(options = {}) {
      * cleanly, and the first person to notice would otherwise be a user whose
      * proof could not be built.
      */
-    checkIntegrity(options) {
-      return checkStore(store, options);
+    async checkIntegrity(options) {
+      const report = await checkStore(store, options);
+      lastIntegrity = { checkedAt: now(), ...report };
+      return report;
+    },
+
+    /**
+     * The last integrity check, for /metrics.
+     *
+     * Kept because an operator who started with OREOCHAIN_ALLOW_DAMAGED_STORE
+     * has a gateway that is up, serving, and quietly unable to prove some of
+     * what it anchored. A startup log line scrolls away; a gauge does not.
+     */
+    integrity() {
+      return lastIntegrity;
     },
 
     close() {

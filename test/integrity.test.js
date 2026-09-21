@@ -307,6 +307,29 @@ test("back up, destroy, restore, and the proof still verifies", async () => {
   }
 });
 
+test("the last check is kept, so /metrics can report a damaged store", async () => {
+  const dbPath = path.join(tempDir(), "proofs.log");
+  await populate(dbPath, 4);
+  rewrite(dbPath, (all) => all.filter((_, index) => index !== 1));
+
+  const service = await createProofService({ dbPath });
+  try {
+    // A gateway started with OREOCHAIN_ALLOW_DAMAGED_STORE is up and serving
+    // while some of what it anchored cannot be proved. The startup log line
+    // scrolls away; this is what an alert can be hung on.
+    assert.equal(service.integrity(), null, "nothing is claimed before a check runs");
+
+    await service.checkIntegrity();
+    const last = service.integrity();
+
+    assert.equal(last.ok, false);
+    assert.equal(last.damagedRoots.length, 1);
+    assert.ok(Number.isInteger(last.checkedAt), "the report carries when it ran");
+  } finally {
+    service.close();
+  }
+});
+
 test("a gateway refuses to serve from a restore that lost records", async () => {
   const dbPath = path.join(tempDir(), "proofs.log");
   await populate(dbPath, 5);

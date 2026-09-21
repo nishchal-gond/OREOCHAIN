@@ -540,6 +540,21 @@ report. It takes no lock and opens no write handle, so it is safe to point at a
 live store as well as at a backup — the worst it can see is that torn final
 line, which it reports rather than removes.
 
+Put it in cron. The startup check happens once: a process running for months
+is reporting on the store as it was when it opened, and this is the only thing
+that would notice bit rot or a stray edit in between. Out of process is the
+right place for it, because a rehash of a large store inside the gateway would
+stall the event loop.
+
+```cron
+17 * * * * cd /srv/oreochain && npm run verify-store -- /data/oreochain-proofs.log --json > /var/log/oreochain-store-check.json
+```
+
+Two gauges carry the startup result into `/metrics`:
+`oreochain_store_damaged_batches`, which is what to alert on, and
+`oreochain_store_check_timestamp_seconds`, which distinguishes "nothing is
+wrong" from "nothing has looked".
+
 The gateway runs the same check at startup and refuses to serve a store that
 fails it. That is the backstop, not the plan: by the time the gateway refuses,
 the restore has already been declared done. Check the backup first, while the
