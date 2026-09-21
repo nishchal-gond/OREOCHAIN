@@ -689,6 +689,11 @@ test("metrics count what actually happened", async () => {
     assert.match(body, /oreochain_bytes_pinned_total\S* 4/);
     assert.match(body, /oreochain_uploads_in_flight 0/);
     assert.match(body, /oreochain_documents_pending 0/);
+
+    // Zero until something checks, and zero is also the healthy value, so the
+    // timestamp is what distinguishes "nothing wrong" from "never looked".
+    assert.match(body, /oreochain_store_damaged_batches 0/);
+    assert.match(body, /oreochain_store_check_timestamp_seconds 0/);
   } finally {
     await gw.stop();
   }
