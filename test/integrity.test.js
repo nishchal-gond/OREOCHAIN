@@ -14,9 +14,20 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 import { checkStore, describeReport, DEPTH, PROBLEM } from "../server/integrity.mjs";
 import { openStore, StoreError } from "../server/store.mjs";
@@ -271,6 +282,50 @@ test("a read-only open of a path with no store refuses instead of inventing an e
   assert.throws(() => openStore({ path: dbPath, readOnly: true }), /no proof store at/);
 });
 
+// ----------------------------------------------------------- refusing to run
+
+const GATEWAY = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "server",
+  "index.mjs"
+);
+
+test("refusing to start on a damaged store releases the lock on the way out", async () => {
+  const dbPath = path.join(tempDir(), "proofs.log");
+  await populate(dbPath, 4);
+  rewrite(dbPath, (all) => all.filter((_, index) => index !== 1));
+
+  const started = spawnSync(process.execPath, [GATEWAY], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OREOCHAIN_DB_PATH: dbPath,
+      OREOCHAIN_API_KEYS: "k".repeat(48),
+      OREOCHAIN_STORAGE: "memory",
+      PORT: "18787",
+    },
+  });
+
+  assert.equal(started.status, 1, started.stderr || started.stdout);
+  assert.match(started.stdout + started.stderr, /does not agree with itself/);
+
+  /*
+   * This is the first exit in server/index.mjs that happens while the store's
+   * lock is already held, and a lock left behind names the exiting process's
+   * host and pid with a heartbeat from a second ago. On a host the next start
+   * has a different pid and takes over. In a container the restarted gateway
+   * is pid 1 again, identical to the holder, so the lock refuses — and the
+   * operator who just restored a backup is told a second gateway is running,
+   * which is false and points at the wrong problem.
+   */
+  assert.equal(
+    existsSync(`${dbPath}.lock`),
+    false,
+    "a planned refusal must not leave the store locked behind it"
+  );
+});
+
 // -------------------------------------------------------------- the restore
 
 test("back up, destroy, restore, and the proof still verifies", async () => {
@@ -328,6 +383,61 @@ test("the last check is kept, so /metrics can report a damaged store", async () 
   } finally {
     service.close();
   }
+});
+
+test("a restore that arrived truncated loses its tail and stays consistent", async () => {
+  /*
+   * The likeliest bad restore there is: a transfer that stopped partway, so
+   * the file ends mid-record. What it cannot do is leave a batch naming
+   * documents that are gone, and that is worth pinning down rather than
+   * assuming, because it is the whole reason the log is append-only.
+   *
+   * A batch record is written after the documents it covers, so anything a
+   * tail truncation removes takes every record that depends on it with it.
+   * Lose the batch and its documents simply become pending again; lose the
+   * anchor and the batch is rebuilt and re-anchored, which the contract makes
+   * safe. The dangerous direction is records missing from the *middle*, which
+   * a truncation cannot produce and a partial restore can — that is the test
+   * above this one.
+   */
+  const dir = tempDir();
+  const dbPath = path.join(dir, "proofs.log");
+
+  // Interleaved, as a real store is: documents, a batch over them, an anchor,
+  // then more of the same. A single batch at the end would not exercise this.
+  const service = await createProofService({ dbPath });
+  for (const [first, txHash] of [[1, "ab"], [4, "cd"]]) {
+    for (let n = first; n < first + 3; n++) await service.record(doc(n));
+    const batch = await service.buildPendingBatch();
+    service.recordAnchor(batch.root, { txHash: "0x" + txHash.repeat(32), block: first });
+  }
+  service.close();
+
+  const whole = statSync(dbPath).size;
+  let lastDocuments = Infinity;
+
+  for (const cut of [40, 200, 500, 900, 1400]) {
+    const copy = path.join(dir, `cut-${cut}.log`);
+    copyFileSync(dbPath, copy);
+    truncateSync(copy, whole - cut);
+
+    const store = openStore({ path: copy, readOnly: true });
+    try {
+      assert.equal(store.tornTail(), true, `cut ${cut}: the reader should see a torn tail`);
+
+      const report = await checkStore(store);
+      assert.equal(report.ok, true, `cut ${cut}: ${JSON.stringify(report.problems)}`);
+      assert.ok(
+        report.checked.documents <= lastDocuments,
+        `cut ${cut}: a deeper truncation must not resurrect documents`
+      );
+      lastDocuments = report.checked.documents;
+    } finally {
+      store.close();
+    }
+  }
+
+  assert.ok(lastDocuments < 6, "the deepest cut should have lost something");
 });
 
 test("a gateway refuses to serve from a restore that lost records", async () => {

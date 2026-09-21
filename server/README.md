@@ -734,6 +734,21 @@ runs the same cycle (back up, destroy, restore, serve a proof, verify it
 against the on-chain root) but it cannot tell you that *your* backup job is
 writing to the volume you think it is.
 
+And read the check for what it says. A clean report means this store agrees
+with itself — its batches rebuild to the roots that were anchored, and nothing
+references a record that is missing. It does **not** mean it is *your* store.
+Another deployment's backup, restored over yours, passes every check perfectly,
+because it was written by the same code and is internally sound; it simply
+contains none of your documents. Nothing in the log identifies the deployment
+it belongs to, so there is nothing for the checker to compare against. Confirm
+the file you restored is the right one before you trust the green tick — the
+document count and the anchored-batch count in the report are the quickest
+sanity check against what you know your deployment holds.
+
+The failure mode if you get this wrong is at least the right shape: a proof
+request for one of your documents finds no such document and answers "not
+found", rather than returning a proof against a root that is not yours.
+
 ### When the check finds damage
 
 Every problem is reported with the batch it belongs to:
