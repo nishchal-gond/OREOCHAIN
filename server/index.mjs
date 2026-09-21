@@ -83,6 +83,8 @@ async function main() {
       dbPath: config.dbPath,
       keyringPath: keyringPathFor(config),
       verifier,
+      batchMaxSize: config.batchMaxSize,
+      batchMaxAgeMs: config.batchMaxAgeMs,
     });
   } catch (error) {
     /*

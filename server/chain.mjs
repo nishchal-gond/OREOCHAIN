@@ -215,23 +215,39 @@ export async function createChainClient(options) {
 
       const pending = method.send({ from: account.address, gas: gas.toString() });
 
-      const txHash = await new Promise((resolve, reject) => {
-        pending.once("transactionHash", resolve);
-        pending.once("error", reject);
-      });
-
       /*
+       * Attached now, before the await below, and not after it.
+       *
        * The send promise stays alive until the receipt arrives and nothing is
        * awaiting it, so a later revert would surface as an unhandled
        * rejection and take the process down. It is logged instead; the
        * authority on whether the anchor landed is the contract, next tick.
+       *
+       * Attaching it after the await covered only the case where the send had
+       * already succeeded. A failure at submission — an address out of gas
+       * money, a nonce the node rejects, a revert the node catches before
+       * mining — rejects the awaited promise, so this line was never reached,
+       * the send promise's own rejection went unhandled, and the worker
+       * exited. Anchoring then stopped dead on a faucet running dry, which is
+       * exactly the failure a worker is supposed to sit through: the batch is
+       * still in the store, and the next tick would have retried it.
        */
+      let txHash = null;
       Promise.resolve(pending).catch((error) => {
+        // Before a hash exists the caller is about to be told by the rejection
+        // below, and reports it as "cannot anchor batch". Saying it twice
+        // would only suggest two different failures.
+        if (txHash === null) return;
         log.warn("anchor transaction did not complete cleanly", {
           root,
           txHash,
           message: error.message,
         });
+      });
+
+      txHash = await new Promise((resolve, reject) => {
+        pending.once("transactionHash", resolve);
+        pending.once("error", reject);
       });
 
       return { txHash };

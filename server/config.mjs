@@ -244,6 +244,23 @@ export function loadConfig(env = process.env) {
     allowEphemeralReceiptKey: env.OREOCHAIN_EPHEMERAL_RECEIPT_KEY === "true",
 
     /**
+     * When a batch is worth anchoring: enough documents, or old enough.
+     *
+     * Both are a cost-against-latency trade the operator owns, and until now
+     * neither could be set. A quiet gateway that receipts one document then
+     * waits an hour for the second threshold is behaving exactly as designed
+     * and reads, from outside, as anchoring being broken. A busy one may want
+     * to anchor sooner than a thousand documents to shorten the window in
+     * which a receipt is the only evidence.
+     *
+     * The defaults are unchanged. Nothing is lost while waiting either way:
+     * the receipt already proves the service accepted the document, and the
+     * anchor upgrades that to a public fact.
+     */
+    batchMaxSize: readInt(env, "OREOCHAIN_BATCH_MAX_SIZE", 1000, { min: 1, max: 65_536 }),
+    batchMaxAgeMs: readInt(env, "OREOCHAIN_BATCH_MAX_AGE_MS", 3_600_000, { min: 1000 }),
+
+    /**
      * How much the service says. "info" is one line per request outcome;
      * "warn" is problems only; "debug" adds per-request detail that is too
      * chatty to leave on. Validated here so a typo fails at startup rather

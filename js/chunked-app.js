@@ -20,6 +20,7 @@ import {
   sealManifest,
 } from "./core/manifest.js";
 import { DEFAULT_SUITE, listSuites } from "./core/suites.js";
+import { html, safe, toHtml } from "./core/html.js";
 import { refusalAdvice } from "./core/refusals.js";
 import { exportReceipt } from "./core/receipt.js";
 import { createAdapterFromConfig, putAll } from "./storage/ipfs.js";
@@ -84,7 +85,7 @@ function el(id) {
 
 function say(message, tone = "info") {
   const note = el("note");
-  if (note) note.innerHTML = `<h5 class="text-${tone} text-center">${message}</h5>`;
+  if (note) note.innerHTML = html`<h5 class="text-${tone} text-center">${message}</h5>`.value;
   else console.log(`[OREOCHAIN] ${message}`);
 }
 
@@ -469,14 +470,19 @@ async function confirmAnchor(receipt, inclusion) {
     return;
   }
 
+  /*
+   * Built with the tag, not concatenated: a safe value survives being
+   * interpolated into another safe template, and a plain string does not
+   * survive being concatenated onto one. The transaction hash comes off the
+   * chain and goes inside an href, which is the interpolation that most wants
+   * escaping on this page.
+   */
   const link = result.txHash
-    ? ` <a target="_blank" rel="noopener" href="${contractConfig.explorer}/tx/${result.txHash}">` +
-      `View the transaction</a>`
+    ? html` <a target="_blank" rel="noopener" href="${contractConfig.explorer}/tx/${result.txHash}">View the transaction</a>`
     : "";
   setAnchorState(
     "anchored",
-    `Anchored on-chain in block ${result.block ?? "—"}, verified in this browser against the ` +
-      `batch root read from the chain.${link}`
+    html`Anchored on-chain in block ${result.block ?? "—"}, verified in this browser against the batch root read from the chain.${link}`
   );
 }
 
@@ -494,29 +500,29 @@ function setAnchorState(state, message) {
 
   node.className = `p-2 info alert alert-${label[1]} my-2`;
   node.dataset.state = state;
-  node.innerHTML = `<strong>${label[0]}.</strong> ${message}`;
+  node.innerHTML = html`<strong>${label[0]}.</strong> ${message}`.value;
 }
 
 function renderReceipt({ packed, manifestCID, receipt, checked, pending }) {
-  const set = (id, html) => {
+  const set = (id, markup) => {
     const node = el(id);
-    if (node) node.innerHTML = html;
+    if (node) node.innerHTML = toHtml(markup);
   };
 
   const status = document.querySelector(".transaction-status");
   if (status) status.classList.remove("d-none");
 
   const statement = receipt.statement;
-  set("file-hash", `<i class="fa-solid fa-hashtag mx-1"></i>${statement.fileHash}`);
-  set("merkle-root", `<i class="fa-solid fa-sitemap mx-1"></i>${statement.merkleRoot}`);
-  set("manifest-cid", `<i class="fa-solid fa-box mx-1"></i>${manifestCID}`);
+  set("file-hash", html`<i class="fa-solid fa-hashtag mx-1"></i>${statement.fileHash}`);
+  set("merkle-root", html`<i class="fa-solid fa-sitemap mx-1"></i>${statement.merkleRoot}`);
+  set("manifest-cid", html`<i class="fa-solid fa-box mx-1"></i>${manifestCID}`);
   set(
     "chunk-summary",
-    `<i class="fa-solid fa-layer-group mx-1"></i>${packed.totalChunks} chunks · ${humanSize(
+    html`<i class="fa-solid fa-layer-group mx-1"></i>${packed.totalChunks} chunks · ${humanSize(
       packed.fileSize
     )} · ${packed.encrypted ? packed.suite : "unencrypted"}`
   );
-  set("time-stamps", `<i class="fa-solid fa-clock mx-1"></i>${statement.issuedAt}`);
+  set("time-stamps", html`<i class="fa-solid fa-clock mx-1"></i>${statement.issuedAt}`);
 
   if (checked.valid) {
     /*
@@ -540,7 +546,7 @@ function renderReceipt({ packed, manifestCID, receipt, checked, pending }) {
   }
 
   if (typeof pending === "number" && pending > 0) {
-    set("blockNumber", `<i class="fa-solid fa-layer-group mx-1"></i>${pending} waiting to anchor`);
+    set("blockNumber", html`<i class="fa-solid fa-layer-group mx-1"></i>${pending} waiting to anchor`);
   }
 
   const url = `${location.origin}${location.pathname.replace(
@@ -576,9 +582,9 @@ function offerReceiptDownload(receipt, fileHash) {
 }
 
 function renderUploadResult({ packed, manifestCID, receipt, explorer }) {
-  const set = (id, html) => {
+  const set = (id, markup) => {
     const node = el(id);
-    if (node) node.innerHTML = html;
+    if (node) node.innerHTML = toHtml(markup);
   };
 
   const status = document.querySelector(".transaction-status");
@@ -586,19 +592,19 @@ function renderUploadResult({ packed, manifestCID, receipt, explorer }) {
 
   set(
     "transaction-hash",
-    `<i class="fa fa-check-circle mx-1"></i><a target="_blank" rel="noopener" href="${explorer}/tx/${receipt.transactionHash}">${receipt.transactionHash}</a>`
+    html`<i class="fa fa-check-circle mx-1"></i><a target="_blank" rel="noopener" href="${explorer}/tx/${receipt.transactionHash}">${receipt.transactionHash}</a>`
   );
-  set("file-hash", `<i class="fa-solid fa-hashtag mx-1"></i>${packed.fileHashHex}`);
-  set("merkle-root", `<i class="fa-solid fa-sitemap mx-1"></i>${packed.merkleRootHex}`);
-  set("manifest-cid", `<i class="fa-solid fa-box mx-1"></i>${manifestCID}`);
+  set("file-hash", html`<i class="fa-solid fa-hashtag mx-1"></i>${packed.fileHashHex}`);
+  set("merkle-root", html`<i class="fa-solid fa-sitemap mx-1"></i>${packed.merkleRootHex}`);
+  set("manifest-cid", html`<i class="fa-solid fa-box mx-1"></i>${manifestCID}`);
   set(
     "chunk-summary",
-    `<i class="fa-solid fa-layer-group mx-1"></i>${packed.totalChunks} chunks · ${humanSize(
+    html`<i class="fa-solid fa-layer-group mx-1"></i>${packed.totalChunks} chunks · ${humanSize(
       packed.fileSize
     )} · ${packed.encrypted ? packed.suite : "unencrypted"}`
   );
-  set("blockNumber", `<i class="fa-solid fa-cube mx-1"></i>${receipt.blockNumber}`);
-  set("time-stamps", `<i class="fa-solid fa-clock mx-1"></i>${new Date().toISOString()}`);
+  set("blockNumber", html`<i class="fa-solid fa-cube mx-1"></i>${receipt.blockNumber}`);
+  set("time-stamps", html`<i class="fa-solid fa-clock mx-1"></i>${new Date().toISOString()}`);
 
   const url = `${location.origin}${location.pathname.replace(
     /[^/]*$/,
@@ -732,9 +738,9 @@ export async function retrieveChunked() {
 }
 
 function renderRetrieveStatus(onChain, fileHash, explorer) {
-  const set = (id, html) => {
+  const set = (id, markup) => {
     const node = el(id);
-    if (node) node.innerHTML = html;
+    if (node) node.innerHTML = toHtml(markup);
   };
   const status = document.querySelector(".transaction-status");
   if (status) status.classList.toggle("d-none", !onChain);
@@ -742,26 +748,26 @@ function renderRetrieveStatus(onChain, fileHash, explorer) {
 
   set(
     "doc-status",
-    `<h3 class="text-info">Registered on-chain <i class="fa fa-check-circle"></i></h3>`
+    html`<h3 class="text-info">Registered on-chain <i class="fa fa-check-circle"></i></h3>`
   );
-  set("file-hash", `<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`);
-  set("merkle-root", `<i class="fa-solid fa-sitemap mx-1"></i>${onChain.merkleRoot}`);
-  set("manifest-cid", `<i class="fa-solid fa-box mx-1"></i>${onChain.manifestCID}`);
+  set("file-hash", html`<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`);
+  set("merkle-root", html`<i class="fa-solid fa-sitemap mx-1"></i>${onChain.merkleRoot}`);
+  set("manifest-cid", html`<i class="fa-solid fa-box mx-1"></i>${onChain.manifestCID}`);
   set(
     "chunk-summary",
-    `<i class="fa-solid fa-layer-group mx-1"></i>${onChain.totalChunks} chunks · ${humanSize(
+    html`<i class="fa-solid fa-layer-group mx-1"></i>${onChain.totalChunks} chunks · ${humanSize(
       onChain.fileSize
     )} · ${onChain.encrypted ? "encrypted" : "public"}`
   );
-  set("blockNumber", `<i class="fa-solid fa-cube mx-1"></i>${onChain.blockNumber}`);
+  set("blockNumber", html`<i class="fa-solid fa-cube mx-1"></i>${onChain.blockNumber}`);
   set(
     "time-stamps",
-    `<i class="fa-solid fa-clock mx-1"></i>${new Date(onChain.timestamp * 1000).toUTCString()}`
+    html`<i class="fa-solid fa-clock mx-1"></i>${new Date(onChain.timestamp * 1000).toUTCString()}`
   );
-  set("college-name", `<i class="fa-solid fa-building-columns mx-1"></i>${onChain.info}`);
+  set("college-name", html`<i class="fa-solid fa-building-columns mx-1"></i>${onChain.info}`);
   set(
     "exporter-address",
-    `<i class="fa-solid fa-user-shield mx-1"></i><a target="_blank" rel="noopener" href="${explorer}/address/${onChain.exporter}">${onChain.exporter}</a>`
+    html`<i class="fa-solid fa-user-shield mx-1"></i><a target="_blank" rel="noopener" href="${explorer}/address/${onChain.exporter}">${onChain.exporter}</a>`
   );
 }
 
@@ -915,16 +921,16 @@ async function verifyViaBatch(fileHash) {
   const status = document.querySelector(".transaction-status");
   if (status) status.classList.remove("d-none");
 
-  const set = (id, html) => {
+  const set = (id, markup) => {
     const node = el(id);
-    if (node) node.innerHTML = html;
+    if (node) node.innerHTML = toHtml(markup);
   };
-  set("file-hash", `<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`);
+  set("file-hash", html`<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`);
 
   if (!result.valid) {
     set(
       "doc-status",
-      '<h3 class="text-danger">Does not check out <i class="fa fa-times-circle"></i></h3>'
+      safe('<h3 class="text-danger">Does not check out <i class="fa fa-times-circle"></i></h3>')
     );
     say(`An anchor exists for this hash but did not verify: ${result.reason}`, "danger");
     return { registered: false, anchored: false, fileHash, reason: result.reason };
@@ -932,19 +938,19 @@ async function verifyViaBatch(fileHash) {
 
   set(
     "doc-status",
-    '<h3 class="text-success">Anchored on-chain <i class="fa fa-check-circle"></i></h3>'
+    safe('<h3 class="text-success">Anchored on-chain <i class="fa fa-check-circle"></i></h3>')
   );
-  set("merkle-root", `<i class="fa-solid fa-sitemap mx-1"></i>${inclusion.document.merkleRoot}`);
-  set("manifest-cid", `<i class="fa-solid fa-box mx-1"></i>${inclusion.document.manifestCID}`);
-  set("blockNumber", `<i class="fa-solid fa-cube mx-1"></i>${inclusion.block ?? "—"}`);
+  set("merkle-root", html`<i class="fa-solid fa-sitemap mx-1"></i>${inclusion.document.merkleRoot}`);
+  set("manifest-cid", html`<i class="fa-solid fa-box mx-1"></i>${inclusion.document.manifestCID}`);
+  set("blockNumber", html`<i class="fa-solid fa-cube mx-1"></i>${inclusion.block ?? "—"}`);
   set(
     "exporter-address",
-    `<i class="fa-solid fa-link mx-1"></i><a target="_blank" rel="noopener" ` +
-      `href="${contractConfig.explorer}/tx/${inclusion.txHash}">${inclusion.txHash}</a>`
+    html`<i class="fa-solid fa-link mx-1"></i><a target="_blank" rel="noopener"
+      href="${contractConfig.explorer}/tx/${inclusion.txHash}">${inclusion.txHash}</a>`
   );
   set(
     "chunk-summary",
-    `<i class="fa-solid fa-layer-group mx-1"></i>in a batch of ${Number(batch.size ?? batch[2])} documents`
+    html`<i class="fa-solid fa-layer-group mx-1"></i>in a batch of ${Number(batch.size ?? batch[2])} documents`
   );
 
   say(
@@ -985,7 +991,8 @@ function notRegistered(fileHash) {
       '<h3 class="text-danger">Not registered <i class="fa fa-times-circle"></i></h3>';
   }
   const hashField = el("file-hash");
-  if (hashField) hashField.innerHTML = `<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`;
+  if (hashField)
+    hashField.innerHTML = html`<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`.value;
   say("This file does not match any registered document.", "danger");
   return { registered: false, fileHash };
 }
@@ -1020,23 +1027,26 @@ async function verifyWithoutChain(client, fileHash) {
 
   const panel = document.querySelector(".transaction-status");
   if (panel) panel.classList.remove("d-none");
-  const set = (id, html) => {
+  const set = (id, markup) => {
     const node = el(id);
-    if (node) node.innerHTML = html;
+    if (node) node.innerHTML = toHtml(markup);
   };
-  set("file-hash", `<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`);
+  set("file-hash", html`<i class="fa-solid fa-hashtag mx-1"></i>${fileHash}`);
 
-  const hint =
+  // The one message on this page whose markup is deliberate. It is written
+  // here, interpolates nothing, and passes through the tag intact below.
+  const hint = safe(
     "This page has no read-only RPC endpoint configured, so it cannot check the chain " +
-    "itself. Set <code>contract.rpcUrl</code> in <code>js/config.js</code> to get a full " +
-    "verification here.";
+      "itself. Set <code>contract.rpcUrl</code> in <code>js/config.js</code> to get a full " +
+      "verification here."
+  );
 
   // A chain the gateway could not reach says nothing about the document, and
   // must never be shown as a document that failed to verify.
   if (status === "unavailable") {
-    set("doc-status", '<h3 class="text-warning">Could not check <i class="fa fa-clock"></i></h3>');
+    set("doc-status", safe('<h3 class="text-warning">Could not check <i class="fa fa-clock"></i></h3>'));
     say(
-      `The service could not reach the chain just now, so nothing is confirmed either way. ${hint}`,
+      html`The service could not reach the chain just now, so nothing is confirmed either way. ${hint}`,
       "warning"
     );
     return { registered: null, fileHash, checked };
@@ -1046,12 +1056,12 @@ async function verifyWithoutChain(client, fileHash) {
   const pathOk = checked.inclusion ? checked.inclusion.valid : null;
 
   if (signatureOk === false && checked.receipt.forged) {
-    set("doc-status", '<h3 class="text-danger">Not from this service <i class="fa fa-times-circle"></i></h3>');
+    set("doc-status", safe('<h3 class="text-danger">Not from this service <i class="fa fa-times-circle"></i></h3>'));
     say(checked.receipt.reason, "danger");
     return { registered: false, fileHash, checked };
   }
   if (pathOk === false || checked.consistent === false) {
-    set("doc-status", '<h3 class="text-danger">Does not check out <i class="fa fa-times-circle"></i></h3>');
+    set("doc-status", safe('<h3 class="text-danger">Does not check out <i class="fa fa-times-circle"></i></h3>'));
     say(
       `The service's own records disagree about this document: ${
         checked.warnings[0] || (checked.inclusion && checked.inclusion.reason) || "unknown reason"
@@ -1064,28 +1074,50 @@ async function verifyWithoutChain(client, fileHash) {
   if (checked.anchor) {
     set(
       "exporter-address",
-      `<i class="fa-solid fa-link mx-1"></i><a target="_blank" rel="noopener" ` +
-        `href="${config().contract.explorer}/tx/${checked.anchor.txHash}">${checked.anchor.txHash}</a>`
+      html`<i class="fa-solid fa-link mx-1"></i><a target="_blank" rel="noopener"
+        href="${config().contract.explorer}/tx/${checked.anchor.txHash}">${checked.anchor.txHash}</a>`
     );
-    set("blockNumber", `<i class="fa-solid fa-cube mx-1"></i>${checked.anchor.block ?? "—"}`);
+    set("blockNumber", html`<i class="fa-solid fa-cube mx-1"></i>${checked.anchor.block ?? "—"}`);
   }
   if (body.batch) {
-    set("merkle-root", `<i class="fa-solid fa-sitemap mx-1"></i>${body.batch.document.merkleRoot}`);
-    set("manifest-cid", `<i class="fa-solid fa-box mx-1"></i>${body.batch.document.manifestCID}`);
+    set("merkle-root", html`<i class="fa-solid fa-sitemap mx-1"></i>${body.batch.document.merkleRoot}`);
+    set("manifest-cid", html`<i class="fa-solid fa-box mx-1"></i>${body.batch.document.manifestCID}`);
   }
 
-  set("doc-status", '<h3 class="text-warning">Partly checked <i class="fa fa-circle-half-stroke"></i></h3>');
+  set("doc-status", safe('<h3 class="text-warning">Partly checked <i class="fa fa-circle-half-stroke"></i></h3>'));
   const anchored =
     checked.anchor !== null
       ? `The service says it is anchored in the transaction above; this page did not confirm that.`
       : `The service does not claim it is anchored on-chain yet.`;
   say(
-    `Checked here: the service signed for this exact file, and its inclusion proof is ` +
-      `internally consistent. Not checked here: whether that batch is on the chain. ` +
-      `${anchored} ${hint}`,
+    html`Checked here: the service signed for this exact file, and its inclusion proof is internally consistent. Not checked here: whether that batch is on the chain. ${anchored}${retirementNote(
+      checked.receipt
+    )} ${hint}`,
     "warning"
   );
   return { registered: null, anchored: null, fileHash, checked };
+}
+
+/**
+ * A word about a receipt whose signing key the service has since replaced.
+ *
+ * Said because it checked out, not despite it. A receipt signed by a retired
+ * key is exactly as good as one signed by the current key — the service
+ * committed to the document at the time and the keyring still holds the key
+ * that proves it — but the phrase "retired key" is alarming enough that
+ * someone who learns it elsewhere, and not here, will reasonably wonder what
+ * they were not told. Saying it plainly, next to the verdict, is what makes
+ * the verdict believable.
+ *
+ * Nothing is said when the key is still current, which is the ordinary case
+ * and needs no sentence.
+ */
+function retirementNote(receipt) {
+  if (!receipt || !receipt.valid || !receipt.retiredAt) return "";
+  return (
+    ` The key that signed it has since been retired by the service, which does not weaken it: ` +
+    `the receipt was issued while that key was in use, and the service still publishes it.`
+  );
 }
 
 /** Hash the selected file locally so the user can look up their own document. */

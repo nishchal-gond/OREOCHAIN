@@ -14,7 +14,7 @@
  * in the running service compiles Solidity.
  */
 
-import { compileContract, confirmed, connect, readChainCli } from "./chain-tools.mjs";
+import { assertFunded, compileContract, confirmed, connect, readChainCli } from "./chain-tools.mjs";
 
 async function main() {
   let config;
@@ -40,15 +40,35 @@ async function main() {
   console.log(`Deployer:  ${chain.account.address} (becomes the owner)`);
   console.log(`Balance:   ${chain.balance} wei`);
 
-  if (!confirmed()) {
-    console.log("\nDry run. Re-run with --confirm to deploy. Nothing was sent.");
-    return;
-  }
-
   const deployment = new chain.web3.eth.Contract(contract.abi).deploy({
     data: contract.bytecode,
   });
-  const gas = await deployment.estimateGas({ from: chain.account.address });
+
+  /*
+   * Estimated before the dry-run exit, because the estimate is most of what a
+   * dry run is for: it is how you know what to put in the account. Best
+   * effort, since a node may refuse to estimate for an address that cannot
+   * pay — in which case saying so is still more use than saying nothing.
+   */
+  let gas = null;
+  try {
+    gas = await deployment.estimateGas({ from: chain.account.address });
+    console.log(`Gas:       ${gas} (about ${(Number(gas) * 2e-9).toFixed(4)} ETH at 2 gwei)`);
+  } catch (error) {
+    console.log(`Gas:       could not be estimated (${error.message})`);
+  }
+
+  if (!confirmed()) {
+    console.log("\nDry run. Re-run with --confirm to deploy. Nothing was sent.");
+    if (!chain.funded) {
+      console.log(`\n${chain.account.address} holds nothing on chain ${chain.chainId}.`);
+      console.log("Fund it with at least the gas above before re-running with --confirm.");
+    }
+    return;
+  }
+
+  assertFunded(chain, "deploy");
+  if (gas === null) gas = await deployment.estimateGas({ from: chain.account.address });
 
   console.log(`\nDeploying (gas estimate ${gas})…`);
   const deployed = await deployment.send({

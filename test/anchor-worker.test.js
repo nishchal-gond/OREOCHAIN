@@ -335,6 +335,100 @@ function workerFor(gw, chain, overrides = {}) {
 
 // --------------------------------------------------------------------- tests
 
+test("an anchoring address that empties is logged every tick, and the worker keeps ticking", async () => {
+  /*
+   * The whole reason a worker is a loop: the faucet runs dry, or a nonce is
+   * rejected, and the batch is still in the store waiting for the tick after
+   * the address is topped up. Losing the process to that turns a temporary
+   * money problem into anchoring being stopped until somebody notices.
+   *
+   * The chain-level half of this is in the createChainClient test below, where
+   * a send-time rejection used to reach process.on("unhandledRejection"). This
+   * half is the loop's own behaviour once the rejection reaches it.
+   */
+  const gw = await startGateway({ batchMaxSize: 1 });
+  try {
+    await recordDocuments(gw, 1);
+
+    const errors = [];
+    let attempts = 0;
+    const broke = {
+      findBatch: async () => null,
+      anchorBatch: async () => {
+        attempts++;
+        throw new Error("Returned error: insufficient funds for gas * price + value");
+      },
+    };
+    const worker = workerFor(gw, broke, {
+      log: { ...silent, error: (message, fields) => errors.push({ message, fields }) },
+    });
+
+    for (let i = 0; i < 3; i++) await worker.tick();
+
+    assert.equal(attempts, 3, "it keeps trying rather than giving up on the batch");
+    assert.equal(errors.length, 3, "and says so each time, because this needs a human");
+    assert.match(errors[0].fields.message, /insufficient funds/);
+    assert.equal(worker.counts().failures, 3);
+
+    // The batch is still there for the tick after the address is topped up.
+    const unanchored = await gw.client.unanchored();
+    assert.equal(unanchored.length, 1);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a quiet gateway says what it is waiting for, once, rather than nothing", async () => {
+  /*
+   * The complaint this answers: a gateway receipts one document and then
+   * anchors nothing for an hour, because neither threshold has been reached.
+   * That is the design working. From outside — no batches, no transactions,
+   * a worker ticking over quietly — it is indistinguishable from anchoring
+   * being broken, and the first person to hit it had to flush a batch by hand
+   * to find out which it was.
+   *
+   * The thresholds come from the gateway's own status rather than from the
+   * worker's idea of the defaults, so the numbers in the log are the numbers
+   * actually in force.
+   */
+  const gw = await startGateway({ batchMaxSize: 5, batchMaxAgeMs: 900_000 });
+  try {
+    await recordDocuments(gw, 1);
+
+    const said = [];
+    const worker = workerFor(gw, { findBatch: async () => null }, {
+      log: { ...silent, info: (message, fields) => said.push({ message, fields }) },
+    });
+
+    await worker.tick();
+    const waiting = said.filter((line) => line.message.includes("not yet worth a batch"));
+    assert.equal(waiting.length, 1);
+    assert.deepEqual(waiting[0].fields, {
+      pending: 1,
+      batchMaxSize: 5,
+      batchMaxAgeMs: 900_000,
+    });
+
+    // Once per waiting spell. Repeating it every tick would bury the log it
+    // is trying to make readable.
+    await worker.tick();
+    await worker.tick();
+    assert.equal(
+      said.filter((line) => line.message.includes("not yet worth a batch")).length,
+      1
+    );
+
+    // And it stops waiting when the threshold is met.
+    await recordDocuments(gw, 4);
+    const status = await gw.client.status();
+    assert.equal(status.shouldFlush, true);
+    assert.equal(status.batchMaxSize, 5, "the thresholds are reported, not only applied");
+    assert.equal(status.batchMaxAgeMs, 900_000);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test("a pending batch is built, anchored on-chain and reported back", { skip }, async () => {
   const chain = await testChain();
   const gw = await startGateway({ batchMaxSize: 2 });
@@ -794,4 +888,55 @@ test("anchorBatch returns on the transaction hash, not on the receipt", async ()
   settle.reject(new Error("reverted later"));
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("a transaction that fails at submission is reported, and the worker lives", async () => {
+  const { createChainClient } = await import("../server/chain.mjs");
+
+  /*
+   * The failure a worker exists to sit through: the anchoring address runs
+   * out of gas money, or the node rejects the nonce, or it catches a revert
+   * before mining. The send promise rejects without ever emitting a hash.
+   *
+   * This used to kill the process. The guard against a late rejection was
+   * attached after the await, so a send-time failure threw past it, and the
+   * send promise's own rejection reached process.on("unhandledRejection").
+   * Anchoring stopped on a dry faucet, with the batch still sitting in the
+   * store that the next tick would have retried.
+   *
+   * This bites: move the catch in server/chain.mjs back below the await and
+   * the runner fails this file on the unhandled rejection.
+   */
+  const listeners = new Map();
+  let settle;
+  const pending = new Promise((resolve, reject) => {
+    settle = { resolve, reject };
+  });
+  pending.once = (event, handler) => {
+    listeners.set(event, handler);
+    return pending;
+  };
+
+  const fake = fakeWeb3({
+    found: () => ({ blockNumber: 0n }),
+    onSend: () => {
+      setImmediate(() => {
+        const error = new Error("Returned error: insufficient funds for gas * price + value");
+        // web3 both emits and rejects, which is what made this two failures.
+        listeners.get("error")?.(error);
+        settle.reject(error);
+      });
+      return pending;
+    },
+  });
+  const chain = await createChainClient({ ...CHAIN_BASE, web3Module: fake.module });
+
+  await assert.rejects(
+    () => chain.anchorBatch({ root: "0x" + "cc".repeat(32), size: 1, uri: "" }),
+    /insufficient funds/,
+    "the caller is still told, so the worker logs it and retries next tick"
+  );
+
+  // Long enough for an unhandled rejection to be reported, if there were one.
+  for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
 });
