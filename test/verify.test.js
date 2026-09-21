@@ -129,6 +129,74 @@ test("a client cannot mark its own document verified", async () => {
   assert.ok(result.valid, result.reason);
 });
 
+test("a client cannot state how its own document was encrypted", async () => {
+  // The same argument as `verified`, one step removed. These two ride inside a
+  // statement the gateway marks `verified: true`, so a reader takes them as
+  // checked; before this they were whatever the uploader typed.
+  const real = await sealedDocument("secret contents", { passphrase: "correct horse" });
+  assert.equal(real.manifest.encrypted, true);
+
+  const { proofs } = await service(backendServing({ bafyManifestReal: real.bytes }));
+  const { receipt } = await proofs.record({
+    ...real.document,
+    encrypted: false,
+    suite: "totally-made-up-suite-v9",
+  });
+
+  assert.equal(receipt.statement.verified, true);
+  assert.equal(receipt.statement.encrypted, true, "the manifest says encrypted");
+  assert.equal(receipt.statement.suite, real.manifest.suite);
+  assert.notEqual(receipt.statement.suite, "totally-made-up-suite-v9");
+});
+
+test("a plaintext document cannot be receipted as sealed", async () => {
+  // The lie in the flattering direction: claiming a cipher for a file anyone
+  // can read straight out of IPFS.
+  const real = await sealedDocument("not secret at all");
+  assert.equal(real.manifest.encrypted, false);
+
+  const { proofs } = await service(backendServing({ bafyManifestReal: real.bytes }));
+  const { receipt } = await proofs.record({
+    ...real.document,
+    encrypted: true,
+    suite: "aes-256-gcm",
+  });
+
+  assert.equal(receipt.statement.encrypted, false);
+  assert.equal(receipt.statement.suite, null, "no suite, because nothing was sealed");
+});
+
+test("an encrypted document is receipted as encrypted even when the client says nothing", async () => {
+  // The failure that made the honest client look like the attacker: omitting
+  // the field had it signed as `encrypted: false`.
+  const real = await sealedDocument("secret contents", { passphrase: "correct horse" });
+  const { proofs } = await service(backendServing({ bafyManifestReal: real.bytes }));
+
+  const { receipt } = await proofs.record(real.document);
+
+  assert.equal(receipt.statement.encrypted, true);
+  assert.equal(receipt.statement.suite, real.manifest.suite);
+});
+
+test("without a verifier the statement leaves encryption out rather than guessing", async () => {
+  const real = await sealedDocument("secret contents", { passphrase: "correct horse" });
+  const { proofs, keys } = await service(null); // nothing read the manifest
+
+  const { receipt } = await proofs.record({ ...real.document, encrypted: true, suite: "aes-256-gcm" });
+
+  // A receipt is delivered as JSON, and JSON has no undefined: the fields are
+  // simply not there. Absent is the honest answer — this gateway did not look
+  // — where `false` and `null` would be assertions it cannot make.
+  const delivered = JSON.parse(JSON.stringify(receipt));
+  assert.equal("encrypted" in delivered.statement, false);
+  assert.equal("suite" in delivered.statement, false);
+
+  // And the omission is not a signature break: canonicalize() drops undefined
+  // keys, so what was signed in memory is byte-identical to what arrives.
+  const result = await verifyReceipt(delivered, await importPublicKey(keys.exported.publicJwk));
+  assert.ok(result.valid, result.reason);
+});
+
 // ------------------------------------------------------- the honest path
 
 test("a document that matches its manifest is receipted and marked verified", async () => {
