@@ -15,6 +15,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { assertSafeConfig, loadConfig } from "../server/config.mjs";
 import { createAnchorConfirmer } from "../server/confirm.mjs";
@@ -22,12 +25,17 @@ import { createHandler } from "../server/gateway.mjs";
 import { createLogger } from "../server/log.mjs";
 import { createMemoryBackend } from "../server/storage.mjs";
 import { createProofService } from "../server/proofs.mjs";
-import { importPublicKey, verifyReceipt } from "../js/core/receipt.js";
+import { generateSigningKey, importPublicKey, verifyReceipt } from "../js/core/receipt.js";
 import { verifyInBatch } from "../js/core/anchor.js";
 
 const KEY = "v".repeat(48);
 const CONTRACT = "0x" + "c0".repeat(20);
 const silent = createLogger({ level: "silent" });
+
+/** A path in a fresh directory, for the tests that need a store on disk. */
+function scratch(name) {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "oreochain-verify-")), name);
+}
 
 /** A chain that says exactly what a test tells it to. */
 function stubChain({
@@ -159,6 +167,138 @@ test("a verifier needs no credential, and gets the materials, not just a verdict
       body.batch.root
     );
     assert.equal(checkedInclusion.valid, true);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("the key that signed the receipt travels with it, and retiredAt null means current", async () => {
+  /*
+   * The point of this route is that one request hands a verifier everything
+   * they need. A receipt they cannot check the signature on is not that, and
+   * telling them to go and fetch the key themselves puts a second round trip
+   * in front of the one thing the route exists to make easy.
+   *
+   * The key served is the one the receipt *names*, not whichever key is
+   * current — see the rotation test below for why that distinction is the
+   * whole feature.
+   */
+  const gw = await startGateway();
+  try {
+    const { document } = await recorded(gw);
+    const body = await (await verify(gw, document.fileHash)).json();
+
+    assert.equal(body.receiptKey.kid, body.receipt.statement.kid);
+
+    // Not merely present: it verifies the receipt it arrived with, with
+    // nothing else fetched.
+    const checked = await verifyReceipt(
+      body.receipt,
+      await importPublicKey(body.receiptKey.publicJwk)
+    );
+    assert.equal(checked.valid, true, checked.reason);
+
+    // And it is the same key the keyring serves by name, so a caller who
+    // would rather not trust this field can still check it against the route
+    // that is the authority on it.
+    const served = await (
+      await fetch(`${gw.url}/api/proofs/key?kid=${body.receiptKey.kid}`)
+    ).json();
+    assert.deepEqual(served.publicJwk, body.receiptKey.publicJwk);
+
+    assert.equal(body.receiptKey.algorithm, "ECDSA-P256-SHA256", "the key route says the same");
+    assert.equal(body.receiptKey.retiredAt, null, "null here means this key is signing now");
+    assert.match(body.howToCheck, /receiptKey\.publicJwk/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a receipt from before a rotation comes back with the key that verifies it", async () => {
+  const keyringPath = scratch("keys.json");
+  const dbPath = scratch("proofs.log");
+
+  const original = await generateSigningKey();
+  const replacement = await generateSigningKey();
+
+  // Day one: a document is recorded and batched under the original key.
+  const before = await createProofService({ ...original.exported, keyringPath, dbPath });
+  const document = aDocument();
+  const { receipt } = await before.record(document);
+  await before.buildPendingBatch();
+  before.close();
+
+  // Later: the operator rotates the signing key and restarts.
+  const gw = await startGateway({
+    proofsOptions: { ...replacement.exported, keyringPath, dbPath },
+  });
+  try {
+    assert.notEqual(gw.proofs.kid, receipt.statement.kid, "a different key signs now");
+
+    const body = await (await verify(gw, document.fileHash)).json();
+
+    // Serving the *current* key here would hand every pre-rotation verifier
+    // a key that fails, with the same answer a forgery gets.
+    assert.equal(body.receiptKey.kid, receipt.statement.kid);
+    assert.notEqual(body.receiptKey.kid, gw.proofs.kid);
+    assert.ok(body.receiptKey.retiredAt, "a retired key says when it was retired");
+
+    const checked = await verifyReceipt(
+      body.receipt,
+      await importPublicKey(body.receiptKey.publicJwk)
+    );
+    assert.equal(checked.valid, true, checked.reason);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("publicJwk null means never held, which is not what retiredAt null means", async () => {
+  /*
+   * Only reachable with a store from somewhere else: a gateway's own ring
+   * always holds its own kid, so a receipt it issued can never be a stranger
+   * to it. That makes this the restored-from-the-wrong-backup case — and the
+   * answer has to distinguish "this gateway never signed with that key" from
+   * "this response does not carry the field", because the first is a fact
+   * worth acting on and the second is not.
+   */
+  const dbPath = scratch("proofs.log");
+  const document = aDocument();
+
+  // One deployment records the document, with its own keyring.
+  const theirs = await createProofService({
+    ...(await generateSigningKey()).exported,
+    keyringPath: scratch("theirs.json"),
+    dbPath,
+  });
+  const { receipt } = await theirs.record(document);
+  await theirs.buildPendingBatch();
+  theirs.close();
+
+  // Another is handed that store, and has a keyring of its own.
+  const gw = await startGateway({
+    proofsOptions: {
+      ...(await generateSigningKey()).exported,
+      keyringPath: scratch("ours.json"),
+      dbPath,
+    },
+  });
+  try {
+    const body = await (await verify(gw, document.fileHash)).json();
+
+    assert.equal(body.receiptKey.kid, receipt.statement.kid);
+    assert.equal(body.receiptKey.publicJwk, null, "a key this ring never held has none to serve");
+    assert.ok("receiptKey" in body, "absent would read as 'not carried', which is a different thing");
+
+    // The two nulls sit one field apart and mean opposite things. This one
+    // says "never held"; retiredAt null, in the test above, says "signing
+    // now". A client that read either as the other would be badly wrong.
+    assert.equal(body.receiptKey.retiredAt, null, "no retirement date for a key never held");
+    assert.notEqual(body.receipt, null, "and the receipt itself is still served");
+
+    // And the route that is the authority on it agrees.
+    const asked = await fetch(`${gw.url}/api/proofs/key?kid=${receipt.statement.kid}`);
+    assert.equal(asked.status, 404);
   } finally {
     await gw.stop();
   }

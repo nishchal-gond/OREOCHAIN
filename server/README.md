@@ -386,6 +386,8 @@ A verifier does not know which was used, so both are looked up.
 {
   "fileHash": "0x…",
   "receipt":  { … },          // the signed receipt, or null
+  "receiptKey": { "kid": "…", "publicJwk": { … }, "algorithm": "ECDSA-P256-SHA256",
+                  "retiredAt": null },
   "batch":    { "root": "0x…", "index": 3, "size": 12, "document": {…},
                 "proof": [ … ],
                 "recorded": { "txHash": "0x…", "block": 21000000 },
@@ -398,6 +400,23 @@ A verifier does not know which was used, so both are looked up.
   "howToCheck": "…"
 }
 ```
+
+`receiptKey` is the public key the receipt names by `kid`, served alongside it
+so checking the signature costs no second request. It is the key that *signed
+this receipt*, not whichever key is current: a receipt issued before a rotation
+comes back with the retired key that verifies it.
+
+**Its two `null`s mean different things, one field apart.** `retiredAt: null`
+means this key is the one signing now — the ordinary case. `publicJwk: null`
+means this gateway has never held that `kid` and has no key to serve, which is
+not the ordinary case at all: a gateway's keyring always holds its own kid, so
+a receipt it issued can never be a stranger to it. Seeing it means the store
+came from somewhere else. Neither is a verdict on the receipt, and a client
+must not read one as the other. `GET /api/proofs/key?kid=` is the authority on
+whether a key is held, and answers 404 for the same kid.
+
+`algorithm` repeats what that route reports, so one client code path can read
+either response.
 
 **The verdict is fenced off on purpose.** Asking this service "is this
 verified?" and believing the answer reinstates exactly the party a signed

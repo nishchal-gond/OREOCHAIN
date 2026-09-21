@@ -4,10 +4,19 @@
  *
  *   node scripts/generate-receipt-key.mjs
  *
- * Store the output in OREOCHAIN_RECEIPT_KEY. Keep it secret and keep it stable:
- * rotating it invalidates every receipt issued under the old key, because
- * nobody can verify them any more. Anchored batches are unaffected — they live
- * on-chain and do not depend on this key.
+ * Store the output in OREOCHAIN_RECEIPT_KEY. Keep it secret.
+ *
+ * Rotating it is supported: the gateway keeps a keyring of every public key
+ * that has ever signed here, so receipts issued under the old key still
+ * verify afterwards and GET /api/proofs/key?kid= still serves the key they
+ * name. This file used to say rotating it left nobody able to verify them,
+ * which stopped being true when the keyring landed — and this is the file an
+ * operator reads just before rotating.
+ *
+ * *Losing* it is still unrecoverable, and it is a different thing from
+ * rotating: a key the ring never saw signs nothing and verifies nothing.
+ * Anchored batches are unaffected either way — they live on-chain and do not
+ * depend on this key.
  */
 
 import { generateSigningKey, keyId } from "../js/core/receipt.js";

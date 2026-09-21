@@ -64,6 +64,15 @@ const ANCHOR_PAGE = 100;
 const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]{1,64}$/;
 
 /**
+ * What every receipt this service signs is signed with.
+ *
+ * Reported in two places — the key route and the verify response — so one
+ * client code path can read either. A constant rather than a string in each,
+ * because two copies of a value a client switches on is how they drift.
+ */
+const RECEIPT_ALGORITHM = "ECDSA-P256-SHA256";
+
+/**
  * Why a request was refused, as one stable token a client can switch on.
  *
  * Status codes are not enough here, because two of them mean opposite things
@@ -576,18 +585,59 @@ export function createHandler(config, backend, deps = {}) {
      * conclusion sits in one clearly named field that a caller is free to
      * ignore and redo.
      */
+    /**
+     * The public key that signed this particular receipt, served alongside it.
+     *
+     * The caller needs it to check the signature, and telling them to go and
+     * fetch it themselves is one more round trip on the one route whose whole
+     * purpose is to hand someone everything they need in a single answer. It
+     * is the key the receipt names by `kid`, not the current one, so a receipt
+     * issued before a rotation comes back with the key that will verify it.
+     *
+     * Two of its fields can be null and they mean different things, so they
+     * are worth keeping straight:
+     *
+     *   retiredAt: null   this key is the one signing now. Ordinary.
+     *   publicJwk: null   this gateway has never held that kid and has no key
+     *                     to serve. Not ordinary: a keyring always holds its
+     *                     own kid, so a receipt this gateway issued can never
+     *                     be a stranger to it, and seeing this means the
+     *                     store came from somewhere else.
+     *
+     * Neither is a verdict on the receipt. `publicJwk: null` is a fact about
+     * this gateway, served rather than omitted so a caller can tell it from a
+     * field the response did not carry; the caller still checks the
+     * signature, which is the point of serving the key at all.
+     *
+     * `algorithm` repeats what GET /api/proofs/key reports, so one client
+     * code path can read either response.
+     */
+    const receiptKeyFor = (receipt) => {
+      const kid = receipt?.statement?.kid;
+      if (!kid) return undefined; // receipts issued before kids existed
+      const held = proofs.publicKeyFor(kid);
+      return {
+        kid,
+        publicJwk: held ? held.publicJwk : null,
+        algorithm: RECEIPT_ALGORITHM,
+        retiredAt: held ? held.retiredAt : null,
+      };
+    };
+
     const answer = (httpStatus, claim, materials = {}) => ({
       status: claim.status,
       httpStatus,
       body: {
         fileHash,
         ...materials,
+        ...(materials.receipt ? { receiptKey: receiptKeyFor(materials.receipt) } : {}),
         gatewayClaim: claim,
         howToCheck:
-          "Do not take gatewayClaim on trust. Verify the receipt's signature against the " +
-          "key at GET /api/proofs/key, recompute the inclusion proof against batch.root, " +
-          "and read findBatch(batch.root) or findDocument(fileHash) on the contract named " +
-          "in chainRead.",
+          "Do not take gatewayClaim on trust. Verify the receipt's signature against " +
+          "receiptKey.publicJwk — the key this receipt names, served here so you do not " +
+          "have to fetch it, and checkable against GET /api/proofs/key?kid= — recompute " +
+          "the inclusion proof against batch.root, and read findBatch(batch.root) or " +
+          "findDocument(fileHash) on the contract named in chainRead.",
       },
     });
 
@@ -1013,7 +1063,7 @@ export function createHandler(config, backend, deps = {}) {
             sendJson(res, 200, {
               kid: key.kid,
               publicJwk: key.publicJwk,
-              algorithm: "ECDSA-P256-SHA256",
+              algorithm: RECEIPT_ALGORITHM,
               retiredAt: key.retiredAt,
             });
             return;
@@ -1022,7 +1072,7 @@ export function createHandler(config, backend, deps = {}) {
           sendJson(res, 200, {
             kid: proofs.kid,
             publicJwk: proofs.publicJwk,
-            algorithm: "ECDSA-P256-SHA256",
+            algorithm: RECEIPT_ALGORITHM,
             ephemeral: proofs.ephemeral,
             keys: proofs.keys(),
           });
