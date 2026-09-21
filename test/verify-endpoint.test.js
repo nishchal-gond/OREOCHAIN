@@ -251,6 +251,51 @@ test("a receipt from before a rotation comes back with the key that verifies it"
   }
 });
 
+test("a receipt this deployment's keyring never signed says so, rather than nothing", async () => {
+  /*
+   * Only reachable with a store from somewhere else: a gateway's own ring
+   * always holds its own kid, so a receipt it issued can never be a stranger
+   * to it. That makes this the restored-from-the-wrong-backup case — and the
+   * answer has to distinguish "this gateway never signed with that key" from
+   * "this response does not carry the field", because the first is a fact
+   * worth acting on and the second is not.
+   */
+  const dbPath = scratch("proofs.log");
+  const document = aDocument();
+
+  // One deployment records the document, with its own keyring.
+  const theirs = await createProofService({
+    ...(await generateSigningKey()).exported,
+    keyringPath: scratch("theirs.json"),
+    dbPath,
+  });
+  const { receipt } = await theirs.record(document);
+  await theirs.buildPendingBatch();
+  theirs.close();
+
+  // Another is handed that store, and has a keyring of its own.
+  const gw = await startGateway({
+    proofsOptions: {
+      ...(await generateSigningKey()).exported,
+      keyringPath: scratch("ours.json"),
+      dbPath,
+    },
+  });
+  try {
+    const body = await (await verify(gw, document.fileHash)).json();
+
+    assert.equal(body.receiptKey.kid, receipt.statement.kid);
+    assert.equal(body.receiptKey.publicJwk, null, "a key this ring never held has none to serve");
+    assert.ok("receiptKey" in body, "absent would read as 'not carried', which is a different thing");
+
+    // And the route that is the authority on it agrees.
+    const asked = await fetch(`${gw.url}/api/proofs/key?kid=${receipt.statement.kid}`);
+    assert.equal(asked.status, 404);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test("a chain it cannot reach is never reported as 'not anchored'", async () => {
   const chain = stubChain({ fail: "ECONNREFUSED" });
   const gw = await startGateway({ reader: chain });
