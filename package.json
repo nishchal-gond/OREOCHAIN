@@ -23,7 +23,8 @@
     "kdf-docs": "node scripts/sync-kdf-docs.mjs",
     "test:e2e": "node --test test/e2e/*.test.js",
     "vendor": "node scripts/vendor-noble.mjs",
-    "test-count": "node scripts/sync-test-count.mjs"
+    "test-count": "node scripts/sync-test-count.mjs",
+    "verify-store": "node scripts/verify-store.mjs"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",

@@ -98,6 +98,74 @@ async function main() {
     });
     process.exit(1);
   }
+  /*
+   * Confirm the store still holds what was anchored, before anything is served
+   * from it.
+   *
+   * A restore is the case this exists for. The log is append-only JSON lines,
+   * so a copy taken mid-append, or one truncated in transit, reads back
+   * without a parse error and simply has fewer records in it — a batch then
+   * names documents that are gone, and the proof nobody can build is
+   * discovered by the user who needed it. Rebuilding each batch root here
+   * turns that into a refusal to start, which is the one moment an operator is
+   * still looking.
+   */
+  if (config.storeCheck !== "off") {
+    /*
+     * Released before exiting, because this is the first thing in this file
+     * that gives up while already holding the store's lock.
+     *
+     * The lock file left behind names the exiting process's host and pid and
+     * carries a heartbeat from a second ago. On a host the next start has a
+     * different pid and takes over, so nothing shows. In a container the
+     * restarted gateway is pid 1 again, identical to the holder, and the lock
+     * refuses — correctly, since a live neighbour sharing a hostname and pid
+     * is indistinguishable from a dead predecessor. The operator restoring a
+     * backup is then told a second gateway is running, which is false and
+     * points at the wrong problem, at the one moment they are reading the
+     * logs.
+     */
+    const refuse = () => {
+      proofs.close();
+      process.exit(1);
+    };
+
+    let report;
+    try {
+      report = await proofs.checkIntegrity({ depth: config.storeCheck });
+    } catch (error) {
+      log.error("proof store integrity check failed to run", { message: error.message });
+      refuse();
+    }
+
+    if (report.ok) {
+      log.info("proof store checked", {
+        depth: report.depth,
+        documents: report.checked.documents,
+        batches: report.checked.batches,
+        anchored: report.checked.anchoredBatches,
+        durationMs: report.durationMs,
+      });
+    } else {
+      for (const problem of report.problems) {
+        log.error("proof store problem", problem);
+      }
+      if (!config.allowDamagedStore) {
+        log.error(
+          "the proof store does not agree with itself: restore it from a backup rather than " +
+            "serving proofs that may be wrong. Set OREOCHAIN_ALLOW_DAMAGED_STORE=true to start " +
+            "anyway and serve the intact batches; the damaged ones refuse either way.",
+          { problems: report.problems.length, damagedBatches: report.damagedRoots.length }
+        );
+        refuse();
+      }
+      log.warn("starting with a damaged proof store", {
+        problems: report.problems.length,
+        damagedBatches: report.damagedRoots.length,
+      });
+    }
+  }
+
   if (proofs.ephemeral) {
     log.warn(
       "receipts are signed with a throwaway key, as OREOCHAIN_EPHEMERAL_RECEIPT_KEY allows: " +

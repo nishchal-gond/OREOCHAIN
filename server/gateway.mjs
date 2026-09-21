@@ -460,6 +460,30 @@ export function createHandler(config, backend, deps = {}) {
       "Documents recorded since the store was created"
     );
     metrics.gauge("oreochain_batches_total", () => proofs.status().batches, "Batches built");
+
+    /*
+     * The store's own health, from the check run at startup.
+     *
+     * A gateway started with OREOCHAIN_ALLOW_DAMAGED_STORE is up and serving
+     * while some of what it anchored cannot be proved — exactly the state
+     * that needs an alert rather than a log line that has scrolled away.
+     * Alert on damaged_batches above zero.
+     *
+     * The timestamp is here because the check happens once, at startup: a
+     * process running for months is reporting on the store as it was when it
+     * opened. `npm run verify-store` from cron is what re-checks a live one,
+     * out of process so a rehash cannot stall the gateway.
+     */
+    metrics.gauge(
+      "oreochain_store_damaged_batches",
+      () => (proofs.integrity() ? proofs.integrity().damagedRoots.length : 0),
+      "Batches that failed the last integrity check"
+    );
+    metrics.gauge(
+      "oreochain_store_check_timestamp_seconds",
+      () => (proofs.integrity() ? Math.floor(proofs.integrity().checkedAt / 1000) : 0),
+      "When the store was last checked; 0 if it never was"
+    );
   }
 
   /*
