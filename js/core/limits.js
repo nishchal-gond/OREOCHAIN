@@ -58,6 +58,14 @@ export const NETWORK_LIMITS = {
   /** Backoff base in milliseconds; doubles each retry with jitter. */
   backoffBaseMs: 250,
   maxBackoffMs: 8_000,
+  /**
+   * The longest `Retry-After` worth sleeping through rather than reporting.
+   *
+   * A gateway asking for thirty seconds is a wobble to wait out. One asking
+   * for ten minutes is telling the client a window has to roll, and holding a
+   * browser tab silently for that is worse for the user than saying so.
+   */
+  maxRetryAfterMs: 30_000,
   /** Per-request timeout. */
   requestTimeoutMs: 60_000,
   /** Concurrent chunk transfers. */

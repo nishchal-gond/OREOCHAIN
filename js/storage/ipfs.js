@@ -15,12 +15,16 @@
  */
 
 import { NETWORK_LIMITS } from "../core/limits.js";
+import { parseRetryAfter, refusalAdvice } from "../core/refusals.js";
 
 const DEFAULT_GATEWAYS = [
   "https://ipfs.io/ipfs/",
   "https://cloudflare-ipfs.com/ipfs/",
   "https://gateway.pinata.cloud/ipfs/",
 ];
+
+/** A refusal body is a few fields; anything larger is not one worth parsing. */
+const MAX_REFUSAL_BYTES = 64 * 1024;
 
 /** CIDs are alphanumeric; anything else could escape a path or switch scheme. */
 const SAFE_LOCATION = /^[A-Za-z0-9_-]{1,512}$/;
@@ -45,9 +49,19 @@ function isAbort(error) {
 /**
  * Transient failures are worth retrying; permanent ones are not.
  * Retrying a 401 or a 400 just wastes time and hammers the service.
+ *
+ * A refusal code, where the gateway sent one, outranks the status. 429 is sent
+ * both for "you sent that too fast" and for "you have spent your allowance for
+ * the hour"; the first clears in a second and the second does not, and only
+ * the code tells them apart. Retrying the second is how a client turns one
+ * refusal into four and leaves the user watching a spinner that cannot win.
  */
 function isRetryable(error) {
   if (isAbort(error)) return false;
+
+  const advice = refusalAdvice(error.code);
+  if (advice) return advice.retry;
+
   if (typeof error.status === "number") {
     return error.status === 408 || error.status === 429 || error.status >= 500;
   }
@@ -77,12 +91,18 @@ function sleep(ms, signal) {
  * Jitter matters more than it looks: without it, every chunk that failed at the
  * same moment retries at the same moment, reproducing the burst that caused the
  * failure. Randomising across the whole interval spreads them out.
+ *
+ * A `Retry-After` from the service wins over the computed backoff, because the
+ * service knows when its window rolls and this side is guessing. It is a floor
+ * rather than an exact delay: jitter still goes on top, or every client the
+ * gateway pushed back reconverges on the same instant.
  */
 export async function withRetry(operation, options = {}) {
   const {
     maxAttempts = NETWORK_LIMITS.maxAttempts,
     backoffBaseMs = NETWORK_LIMITS.backoffBaseMs,
     maxBackoffMs = NETWORK_LIMITS.maxBackoffMs,
+    maxRetryAfterMs = NETWORK_LIMITS.maxRetryAfterMs,
     signal,
     onRetry,
   } = options;
@@ -97,12 +117,46 @@ export async function withRetry(operation, options = {}) {
       if (attempt === maxAttempts || !isRetryable(error)) throw error;
 
       const ceiling = Math.min(backoffBaseMs * 2 ** (attempt - 1), maxBackoffMs);
-      const delay = Math.floor(Math.random() * ceiling);
+      const jitter = Math.floor(Math.random() * ceiling);
+
+      let delay = jitter;
+      if (typeof error.retryAfterMs === "number") {
+        // A long Retry-After is not a wobble to sleep through. Holding a tab
+        // for two minutes to retry silently is worse than saying what happened
+        // and letting the user decide, so it is surfaced rather than waited on.
+        if (error.retryAfterMs > maxRetryAfterMs) throw error;
+        delay = error.retryAfterMs + Math.floor(Math.random() * Math.min(ceiling, 1000));
+      }
+
       if (onRetry) onRetry(attempt, delay, error);
       await sleep(delay, signal);
     }
   }
   throw lastError;
+}
+
+/**
+ * Read a refusal's machine-readable code off a failed response.
+ *
+ * Best-effort by design: a gateway that fell over behind a proxy answers HTML,
+ * and a body that cannot be read must not replace the status error with a
+ * parse error. Bounded because this runs on a response nobody has vetted.
+ */
+async function readRefusal(response) {
+  try {
+    const type = response.headers && response.headers.get && response.headers.get("Content-Type");
+    if (typeof type === "string" && !type.includes("json")) return null;
+    if (typeof response.text !== "function") return null;
+
+    const text = await response.text();
+    if (typeof text !== "string" || text.length === 0 || text.length > MAX_REFUSAL_BYTES) {
+      return null;
+    }
+    const body = JSON.parse(text);
+    return body && typeof body.code === "string" ? body : null;
+  } catch {
+    return null;
+  }
 }
 
 /** fetch with a timeout, composed with any caller-supplied abort signal. */
@@ -125,6 +179,20 @@ async function timedFetch(url, init = {}, { signal, timeoutMs } = {}) {
     if (!response.ok) {
       const error = new Error(`HTTP ${response.status}`);
       error.status = response.status;
+
+      const header =
+        response.headers && response.headers.get && response.headers.get("Retry-After");
+      const retryAfterMs = parseRetryAfter(header);
+      if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
+
+      const refusal = await readRefusal(response);
+      if (refusal) {
+        error.code = refusal.code;
+        // Kept for the log, never shown: the gateway's prose is for operators
+        // and may be reworded, so the UI writes its own from the code.
+        error.serverMessage = typeof refusal.error === "string" ? refusal.error : undefined;
+        error.message = `HTTP ${response.status} (${refusal.code})`;
+      }
       throw error;
     }
     return response;
@@ -316,25 +384,57 @@ export async function putAll(adapter, chunks, options = {}) {
   let done = chunks.length - pending.length;
   if (onProgress && done > 0) onProgress(done, chunks.length);
 
+  /*
+   * When one chunk hits a wall the others must stop too.
+   *
+   * Without this, a gateway that refuses because the day's budget is spent
+   * gets three more concurrent uploads for its trouble — each retrying, each
+   * refused — which is a small denial-of-service aimed at a service that has
+   * already said no, and several seconds of a progress bar the user watches
+   * advance towards a failure that has already happened.
+   */
+  const stop = new AbortController();
+  const relay = () => stop.abort();
+  if (signal) {
+    if (signal.aborted) throw abortError();
+    signal.addEventListener("abort", relay, { once: true });
+  }
+  let failure = null;
+
   async function worker() {
     while (true) {
-      if (signal && signal.aborted) throw abortError();
+      if (stop.signal.aborted) throw abortError();
       const slot = cursor++;
       if (slot >= pending.length) return;
 
       const index = pending[slot];
-      locations[index] = await adapter.put(
-        chunks[index].payload,
-        `${namePrefix}-${String(index).padStart(6, "0")}`,
-        { signal }
-      );
+      try {
+        locations[index] = await adapter.put(
+          chunks[index].payload,
+          `${namePrefix}-${String(index).padStart(6, "0")}`,
+          { signal: stop.signal }
+        );
+      } catch (error) {
+        // The first real failure is the one worth reporting; the aborts it
+        // causes in its siblings are noise that would otherwise race to
+        // replace it.
+        if (!failure && !(isAbort(error) && stop.signal.aborted)) failure = error;
+        stop.abort();
+        throw error;
+      }
       done++;
       if (onProgress) onProgress(done, chunks.length);
     }
   }
 
   const width = Math.max(1, Math.min(concurrency, pending.length));
-  await Promise.all(Array.from({ length: width }, () => worker()));
+  try {
+    await Promise.all(Array.from({ length: width }, () => worker()));
+  } catch (error) {
+    throw failure || error;
+  } finally {
+    if (signal) signal.removeEventListener("abort", relay);
+  }
 
   const missing = locations.findIndex((cid) => !cid);
   if (missing !== -1) throw new Error(`chunk ${missing} did not upload`);
@@ -342,4 +442,6 @@ export async function putAll(adapter, chunks, options = {}) {
   return locations;
 }
 
-export const _internals = { isRetryable, assertSafeLocation, SAFE_LOCATION };
+export { timedFetch };
+
+export const _internals = { isRetryable, assertSafeLocation, readRefusal, SAFE_LOCATION };
