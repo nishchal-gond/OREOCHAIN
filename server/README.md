@@ -32,8 +32,13 @@ adds the things only a server can enforce:
 # Generate an API key for a client
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
+# And the key that signs receipts. The gateway will not start without one,
+# because a throwaway key would disown every receipt at the next restart.
+node scripts/generate-receipt-key.mjs
+
 PINATA_JWT="your-pinata-jwt" \
 OREOCHAIN_API_KEYS="the-key-you-just-generated" \
+OREOCHAIN_RECEIPT_KEY='{"privateJwk":…,"publicJwk":…}' \
 npm start
 ```
 
@@ -41,12 +46,20 @@ For local development with no pinning account, `OREOCHAIN_STORAGE=memory` keeps
 everything in process memory:
 
 ```bash
-OREOCHAIN_STORAGE=memory OREOCHAIN_API_KEYS="$(node -e "console.log('k'.repeat(48))")" npm start
+OREOCHAIN_STORAGE=memory OREOCHAIN_EPHEMERAL_RECEIPT_KEY=true \
+  OREOCHAIN_API_KEYS="$(node -e "console.log('k'.repeat(48))")" npm start
 ```
 
+`OREOCHAIN_EPHEMERAL_RECEIPT_KEY` signs with a throwaway key so there is
+nothing to generate first, and the log says so every time it signs that way.
+It is for development only: every restart invalidates every receipt issued
+before it, and a holder cannot tell that from a forgery. `npm run dev` sets it
+too, along with the in-memory store, static file serving and anonymous access.
+In a deployment, generate a key.
+
 The process refuses to start if it is misconfigured — no API keys, no pinning
-credential, a wildcard CORS origin — rather than running in a state you did not
-intend.
+credential, no receipt key, a wildcard CORS origin — rather than running in a
+state you did not intend.
 
 **A deployment is two processes.** This one issues receipts promising that a
 document will be anchored; [the anchoring worker](#the-anchoring-worker) is
@@ -78,11 +91,14 @@ startup when no anchoring key is configured.
 | `OREOCHAIN_ALLOWED_ORIGINS` | none | Browser origins permitted via CORS. `*` is refused. |
 | `OREOCHAIN_READ_TIMEOUT_MS` | `30000` | Request body timeout |
 | `OREOCHAIN_UPSTREAM_TIMEOUT_MS` | `60000` | Timeout for calls to the pinning service |
+| `OREOCHAIN_IPFS_GATEWAYS` | three public ones | Comma-separated IPFS gateways to read a CID back through, tried in order |
 | `OREOCHAIN_SERVE_STATIC` | `false` | Also serve the frontend, so there is no CORS at all |
 | `OREOCHAIN_RECEIPT_KEY` | — | Receipt signing key pair. Generate with `node scripts/generate-receipt-key.mjs`. Required. |
 | `OREOCHAIN_EPHEMERAL_RECEIPT_KEY` | `false` | Sign with a throwaway key instead. Development only; see below. |
 | `OREOCHAIN_KEYRING_PATH` | beside the store | Every public key that has signed a receipt here |
 | `OREOCHAIN_DB_PATH` | `./oreochain-proofs.log` | Recorded documents and anchored batches. `:memory:` for tests only. |
+| `OREOCHAIN_STORE_CHECK` | `full` | How hard to check the proof store at startup: `full` rebuilds every batch root, `structural` only cross-references, `off` skips it |
+| `OREOCHAIN_ALLOW_DAMAGED_STORE` | `false` | Start anyway when that check finds damage, serving the intact batches |
 | `OREOCHAIN_VERIFY_MANIFESTS` | `true` | Check a document against its manifest before signing a receipt for it |
 | `OREOCHAIN_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
 | `OREOCHAIN_SHUTDOWN_DELAY_MS` | `0` | Keep serving this long after SIGTERM, so a load balancer notices `/ready` first |
@@ -252,6 +268,19 @@ no such key, so *absent* means "not asserted" rather than false, and every
 previously issued receipt still verifies. `OREOCHAIN_VERIFY_MANIFESTS=false`
 turns the check off and the process warns at startup; receipts then say
 `"verified": false`.
+
+`encrypted` and `suite` are read from the manifest header too. The shipped
+client still sends them and a gateway still accepts them, but the values are
+discarded and the manifest's are signed instead. They sit inside a statement
+stamped `"verified": true`, so a reader takes them as checked — but they used
+to be whatever the uploader typed. A client could post `"suite": "made-up-v9"` for a
+document whose manifest says `aes-256-gcm` and have it signed, and the honest
+direction was just as wrong: a client that omitted `encrypted` had a sealed
+document receipted as `"encrypted": false`. With no verifier configured neither
+field appears in the statement at all, which is the honest answer — this
+gateway did not look — where `false` and `null` would be assertions it cannot
+make. They are additive on the same terms as `verified`, so receipts already in
+users' hands still verify.
 
 **What this does not prove:** that the manifest's Merkle root is genuinely the
 root of the chunks it lists. That would mean fetching and hashing the whole
@@ -748,7 +777,174 @@ It is not a secret. Serving it is the point.
    anchored forever with no recoverable inclusion proof. A document is written
    and flushed to disk before its receipt is returned, so a receipt always has
    a stored document behind it. The file is append-only JSON lines, so `wc -l`
-   counts records and `tail` shows the most recent.
+   counts records and `tail` shows the most recent. Backing it up is a `cp`
+   while the gateway runs, and a restore is only done when the copy has been
+   checked — see [Backing up the proof store](#backing-up-the-proof-store-and-restoring-it).
+12. **Check the store after every restore**, with `npm run verify-store`. A log
+   that lost records still parses; only rebuilding each batch root from the
+   documents under it says whether the store can still prove what it claims.
+   The gateway runs that check at startup and refuses a damaged store, which is
+   a backstop rather than the plan.
+
+## Backing up the proof store, and restoring it
+
+The store is the one thing a deployment cannot recreate. Everything else can be
+rebuilt: keys reissued, containers redeployed, the frontend reserved from a CDN.
+An anchored batch's ordered document list cannot — once the root is on-chain,
+that order is the only thing that turns "this root is anchored" into "your
+document is in it". There is no upstream copy to fetch it back from.
+
+### Taking a backup
+
+Copy the file. That is the whole procedure, and it is safe while the gateway is
+running:
+
+```bash
+cp "$OREOCHAIN_DB_PATH" "/backups/proofs-$(date -u +%Y%m%dT%H%M%SZ).log"
+```
+
+Three properties make that true, and all three are deliberate. The log is
+append-only, so a copy can never miss a record that was there when it started.
+Each record is one `write` followed by an `fsync` before the request that
+caused it returns, so a record in the file is a record the client was already
+told about. And a copy caught mid-append can only ever catch a half-written
+*final* line, which a reader drops — the store tolerates a torn tail by design
+because a crash produces the same thing.
+
+What that costs you is the tail: a copy taken at time T holds everything
+receipted before T and nothing after. Take one often enough that the gap is a
+gap you can live with, remembering that a document in the gap has a signed
+receipt in a user's hands and no record here.
+
+Do not back up the `.lock` file beside it, and do not restore one — it names
+the process that held the store, and a stale one is exactly what the lock's
+liveness check exists to clear.
+
+### Checking a backup
+
+A copy that parses is not a copy that proves anything. Records lost in transit,
+a truncated transfer, a partial restore from two snapshots: all of these leave
+a log whose every line is valid JSON and whose batches no longer hash to the
+roots that were anchored. Rebuilding each root from the documents under it is
+what tells them apart, because the root *is* a hash of exactly that order.
+
+```bash
+npm run verify-store -- /backups/proofs-20260919T120000Z.log
+```
+
+```
+/backups/proofs-20260919T120000Z.log
+18422 document(s), 19 batch(es), 19 anchored — full check in 140ms
+no problems found
+```
+
+Exit code 0 means intact, 1 means damaged, 2 means it could not be read, so it
+drops straight into a cron job or a monitoring check. `--json` gives the whole
+report. It takes no lock and opens no write handle, so it is safe to point at a
+live store as well as at a backup — the worst it can see is that torn final
+line, which it reports rather than removes.
+
+Put it in cron. The startup check happens once: a process running for months
+is reporting on the store as it was when it opened, and this is the only thing
+that would notice bit rot or a stray edit in between. Out of process is the
+right place for it, because a rehash of a large store inside the gateway would
+stall the event loop.
+
+```cron
+17 * * * * cd /srv/oreochain && npm run verify-store -- /data/oreochain-proofs.log --json > /var/log/oreochain-store-check.json
+```
+
+Two gauges carry the startup result into `/metrics`:
+`oreochain_store_damaged_batches`, which is what to alert on, and
+`oreochain_store_check_timestamp_seconds`, which distinguishes "nothing is
+wrong" from "nothing has looked".
+
+The gateway runs the same check at startup and refuses to serve a store that
+fails it. That is the backstop, not the plan: by the time the gateway refuses,
+the restore has already been declared done. Check the backup first, while the
+copy you restored *from* is still around.
+
+`OREOCHAIN_STORE_CHECK=structural` skips the rehash for a store large enough
+that startup time matters — it cross-references batches and documents without
+hashing, which catches lost records but not a reordering. For scale: 20,000
+documents rebuild in about 140 ms, so `full` is the right default for almost
+everyone.
+
+### The restore
+
+```bash
+# 1. Stop the gateway. One writer, and the restore is a write.
+docker compose stop gateway
+
+# 2. Check the backup before it becomes the live store.
+npm run verify-store -- /backups/proofs-20260919T120000Z.log
+
+# 3. Put it in place, without deleting what is there.
+mv /data/oreochain-proofs.log /data/oreochain-proofs.log.suspect
+cp /backups/proofs-20260919T120000Z.log /data/oreochain-proofs.log
+
+# 4. Remove a stale lock only if one is left and no gateway is running.
+rm -f /data/oreochain-proofs.log.lock
+
+# 5. Start. It checks the store again and refuses if anything is wrong.
+docker compose start gateway
+```
+
+Keep the suspect file. If the backup turns out to be older than you thought,
+the records in the gap exist only there, and a store can be repaired by
+appending the missing `doc` lines in their original order — the later records
+are position-dependent, so order is not negotiable and this is a job to do
+carefully, not a script to run.
+
+Practise this. A backup nobody has restored is a hypothesis; the test suite
+runs the same cycle (back up, destroy, restore, serve a proof, verify it
+against the on-chain root) but it cannot tell you that *your* backup job is
+writing to the volume you think it is.
+
+And read the check for what it says. A clean report means this store agrees
+with itself — its batches rebuild to the roots that were anchored, and nothing
+references a record that is missing. It does **not** mean it is *your* store.
+Another deployment's backup, restored over yours, passes every check perfectly,
+because it was written by the same code and is internally sound; it simply
+contains none of your documents. Nothing in the log identifies the deployment
+it belongs to, so there is nothing for the checker to compare against. Confirm
+the file you restored is the right one before you trust the green tick — the
+document count and the anchored-batch count in the report are the quickest
+sanity check against what you know your deployment holds.
+
+The failure mode if you get this wrong is at least the right shape: a proof
+request for one of your documents finds no such document and answers "not
+found", rather than returning a proof against a root that is not yours.
+
+### When the check finds damage
+
+Every problem is reported with the batch it belongs to:
+
+```
+14 document(s), 3 batch(es), 3 anchored — full check in 2ms
+1 problem(s) across 1 batch(es):
+  [root_mismatch] batch rebuilds to 0x0b49…, not the recorded 0x7abb… — its
+  documents are not the documents that were anchored
+```
+
+| Kind | What happened |
+|---|---|
+| `missing_document` | A batch names a document that is not in the store. Records were lost. |
+| `root_mismatch` | A batch's documents no longer hash to its recorded root. Its contents changed. |
+| `missing_batch` | A document is in a batch the store does not have. The batch record was lost. |
+| `wrong_batch_index` | A document is listed at a position it does not record itself at. |
+| `unbuildable_batch` | A batch's documents cannot be hashed at all: a field is malformed. |
+
+The answer to all of them is a restore, not a repair. Nothing in this codebase
+will edit a proof store to make it self-consistent, because "consistent" would
+mean agreeing with whatever survived rather than with what was anchored.
+
+If no good backup exists, the damaged batches' documents are unprovable and
+saying so is the only honest option — the anchors stay on-chain, and the
+receipts the gateway issued for them are still valid signatures over what was
+accepted. `OREOCHAIN_ALLOW_DAMAGED_STORE=true` starts the gateway anyway so the
+intact batches keep serving; the damaged ones refuse individually either way,
+because the same rebuild guards every proof the gateway hands out.
 
 ## Running it in a container
 

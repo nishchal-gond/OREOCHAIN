@@ -457,6 +457,7 @@ export function openStore({
   path: filePath,
   fsync = true,
   lock = true,
+  readOnly = false,
   now = () => Date.now(),
 } = {}) {
   const inMemory = !filePath || filePath === ":memory:";
@@ -466,24 +467,45 @@ export function openStore({
   let order = [];
   let handle = null;
   let held = null;
+  let tornTail = false;
 
   if (!inMemory) {
-    mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
+    /*
+     * A reader takes no lock, creates nothing and repairs nothing.
+     *
+     * All three matter for the one thing that opens a store read-only: the
+     * integrity checker, which has to be safe to point at a live store while
+     * the gateway is writing it, and at a restored copy on a read-only mount.
+     * Taking the lock would stop the gateway; truncating a torn trailing line
+     * would be a write into a file the checker was only asked to look at; and
+     * creating the file would turn "this backup is not where you think it is"
+     * into an empty store that passes.
+     */
+    if (!readOnly) {
+      mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
 
-    // Before reading a byte: this store has exactly one writer, and a second
-    // one is a startup failure rather than something to discover in the data.
-    if (lock) held = acquireLock(path.resolve(filePath), { now });
+      // Before reading a byte: this store has exactly one writer, and a second
+      // one is a startup failure rather than something to discover in the data.
+      if (lock) held = acquireLock(path.resolve(filePath), { now });
+    } else if (!existsSync(filePath)) {
+      throw new StoreError(`no proof store at ${filePath}`);
+    }
 
     if (existsSync(filePath)) {
       const replayed = replay(readFileSync(filePath, "utf8"));
       ({ documents, batches, order } = replayed);
+      tornTail = replayed.truncateTo !== null;
 
       // Drop a torn trailing line so the next append starts on a clean
       // boundary. Leaving it would make every subsequent read fail.
-      if (replayed.truncateTo !== null) truncateSync(filePath, replayed.truncateTo);
+      if (!readOnly && replayed.truncateTo !== null) truncateSync(filePath, replayed.truncateTo);
     }
 
-    handle = openSync(filePath, "a");
+    if (!readOnly) handle = openSync(filePath, "a");
+  }
+
+  function refuseWrite() {
+    throw new StoreError("this store is open read-only");
   }
 
   function append(record) {
@@ -504,6 +526,7 @@ export function openStore({
      *   record and one anchor.
      */
     recordDocument(document, receipt) {
+      if (readOnly) refuseWrite();
       const existing = documents.get(document.fileHash);
       if (existing) return { stored: false, document: existing };
 
@@ -535,6 +558,7 @@ export function openStore({
 
     /** Record a built batch and stamp its documents, in one durable append. */
     saveBatch(batch) {
+      if (readOnly) refuseWrite();
       if (batches.has(batch.root)) {
         throw new StoreError(`batch ${batch.root} is already recorded`);
       }
@@ -551,6 +575,7 @@ export function openStore({
 
     /** Note where a batch root landed on-chain. */
     anchorBatch(root, { txHash, block }) {
+      if (readOnly) refuseWrite();
       if (!batches.has(root)) throw new StoreError(`no such batch ${root}`);
       const record = { t: RECORD_ANCHOR, root, txHash, block };
       append(record);
@@ -560,6 +585,16 @@ export function openStore({
 
     findDocument: (fileHash) => documents.get(String(fileHash).toLowerCase()) || null,
     findBatch: (root) => batches.get(root) || null,
+
+    /**
+     * Everything, in log order, for a reader that has to walk the whole store.
+     *
+     * Only the integrity checker (server/integrity.mjs) needs these: nothing
+     * serving a request should ever be iterating the entire log. They are
+     * separate from stats() because a count cannot be cross-referenced.
+     */
+    allBatches: () => [...batches.values()],
+    allDocuments: () => order.map((fileHash) => documents.get(fileHash)).filter(Boolean),
 
     /**
      * Batches that were built but never anchored, oldest first.
@@ -585,6 +620,16 @@ export function openStore({
       for (const document of documents.values()) if (document.batchRoot === null) pending++;
       return { documents: documents.size, batches: batches.size, pending };
     },
+
+    /**
+     * Whether the last line of the log was incomplete when it was read.
+     *
+     * Expected, not damage: an append is one write and a copy taken mid-write
+     * catches half of it. A writer drops the fragment; a reader reports it, so
+     * an operator checking a backup knows the copy is one record short rather
+     * than wondering.
+     */
+    tornTail: () => tornTail,
 
     /** Refresh the lock's heartbeat now; the interval does this on its own. */
     beat() {
