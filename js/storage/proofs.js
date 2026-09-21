@@ -43,6 +43,7 @@ const DEFAULT_ENDPOINTS = Object.freeze({
   record: "/api/proofs/record",
   key: "/api/proofs/key",
   inclusion: "/api/proofs/inclusion/",
+  verify: "/api/proofs/verify/",
 });
 
 const HEX32 = /^0x[0-9a-f]{64}$/;
@@ -136,6 +137,39 @@ export function createProofClient(options = {}) {
         return await getJson(`${route.inclusion}${hash}`, callOptions);
       } catch (error) {
         if (error && error.status === 404) return null;
+        throw error;
+      }
+    },
+
+    /**
+     * Everything the gateway knows about a document, in one call.
+     *
+     * This exists for the deployment that has no `contract.rpcUrl` set. With
+     * an RPC the browser reads the chain itself and needs none of this; with
+     * none, the alternative is telling a visitor nothing at all, which is the
+     * worse answer.
+     *
+     * Its `gatewayClaim` is the gateway's own verdict and is never used as
+     * one. What is worth having is everything beside it: the receipt, the
+     * inclusion proof, the batch root, the transaction. Those can be checked,
+     * and checkVerifyResponse() below checks them.
+     *
+     * Two of its statuses are states rather than failures, so they come back
+     * as answers: 404 is "no record of that document", and 503 is "the
+     * gateway could not reach the chain" — which says nothing about the
+     * document and must never read as "not anchored".
+     */
+    async verify(fileHash, callOptions = {}) {
+      const hash = assertFileHash(fileHash);
+      try {
+        return await getJson(`${route.verify}${hash}`, callOptions);
+      } catch (error) {
+        const body = error && error.refusalBody;
+        if (error && (error.status === 404 || error.status === 503) && body) return body;
+        if (error && error.status === 404) return { fileHash: hash, gatewayClaim: { status: "unknown" } };
+        if (error && error.status === 503) {
+          return { fileHash: hash, gatewayClaim: { status: "unavailable" } };
+        }
         throw error;
       }
     },
@@ -265,3 +299,107 @@ export async function checkAnchor(receipt, inclusion, onChainBatchRoot) {
 }
 
 export const _internals = { DEFAULT_ENDPOINTS, SAFE_KID, assertFileHash };
+
+/**
+ * Check what a verify response actually proves, in this browser.
+ *
+ * Used only where there is no way to read the chain — with an RPC configured
+ * the page reads `findBatch()` itself and this whole path is skipped. The
+ * question it answers is therefore narrower than it looks, and the narrowness
+ * is the point.
+ *
+ * What can be settled here, from the materials alone:
+ *
+ *   - the receipt's signature, against the key that signed it;
+ *   - that the inclusion proof's Merkle path reaches the batch root the
+ *     gateway supplied;
+ *   - that the receipt and the batch leaf describe the same document.
+ *
+ * What cannot, at all: whether that batch root is on the chain. That is one
+ * fact and it needs a chain read. Everything above can be true of a gateway
+ * that has anchored nothing — the arithmetic is its own, and so is the root.
+ *
+ * So `chainConfirmed` is false in every branch of this function. There is no
+ * input that makes it true, deliberately: a caller that wants it has to do
+ * the read. `gatewayClaim` is read for exactly one thing, the transaction and
+ * block to point a person at, and never for its verdict.
+ */
+export async function checkVerifyResponse(body, client, options = {}) {
+  const claim = (body && body.gatewayClaim) || {};
+  const result = {
+    chainConfirmed: false,
+    gatewayStatus: typeof claim.status === "string" ? claim.status : "unknown",
+    warnings: Array.isArray(claim.warnings) ? claim.warnings : [],
+    chainRead: body && body.chainRead ? body.chainRead : null,
+    receipt: null,
+    inclusion: null,
+    consistent: null,
+    anchor: null,
+  };
+
+  if (!body || (!body.receipt && !body.batch)) return result;
+
+  if (body.receipt) {
+    /*
+     * The verify response will carry the signing key itself as an additive
+     * follow-up. Use it when it is there and fall back to the keyring lookup
+     * when it is not, so this works against both and needs no change when the
+     * field lands.
+     */
+    const inline = body.publicJwk || (body.receipt && body.receipt.publicJwk) || null;
+    result.receipt = inline
+      ? await checkReceiptWithJwk(body.receipt, inline, options)
+      : await checkReceipt(body.receipt, client, options);
+  }
+
+  if (body.batch && Array.isArray(body.batch.proof)) {
+    /*
+     * The verify endpoint's `batch` is not an inclusion proof, though it
+     * carries one. It has no top-level fileHash — that lives at the root of
+     * the response — and verifyInBatch() checks the two against each other,
+     * so the proof has to be assembled into the shape that function verifies
+     * rather than handed over as it arrived.
+     */
+    const inclusion = {
+      fileHash: body.fileHash,
+      batchRoot: body.batch.root,
+      index: body.batch.index,
+      document: body.batch.document,
+      proof: body.batch.proof,
+    };
+
+    // Against the root the gateway supplied, which proves internal
+    // consistency and nothing about the chain. Said plainly by the caller.
+    result.inclusion = await verifyInBatch(inclusion, body.batch.root);
+
+    if (body.receipt) {
+      const match = receiptMatchesAnchor(body.receipt, inclusion);
+      result.consistent = match.consistent;
+      if (!match.consistent) result.warnings = [...result.warnings, match.reason];
+    }
+
+    const onChain = body.batch.onChain || body.batch.recorded || null;
+    if (onChain && onChain.txHash) {
+      result.anchor = {
+        txHash: onChain.txHash,
+        block: onChain.block ?? null,
+        // Where the gateway says the root is. A pointer for a person to
+        // follow, not a confirmation — nothing here checked it.
+        claimedOnly: true,
+      };
+    }
+  }
+
+  return result;
+}
+
+/** checkReceipt against a key already in hand, skipping the keyring lookup. */
+async function checkReceiptWithJwk(receipt, publicJwk, options = {}) {
+  let publicKey;
+  try {
+    publicKey = await importPublicKey(publicJwk);
+  } catch (error) {
+    return { valid: false, unavailable: true, reason: `the served key is unusable: ${error.message}` };
+  }
+  return verifyReceipt(receipt, publicKey, options);
+}
