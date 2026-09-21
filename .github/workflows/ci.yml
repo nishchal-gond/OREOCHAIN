@@ -164,10 +164,18 @@ jobs:
       # every deploy kills in-flight requests.
       - name: Start it and check both probes
         run: |
+          # A deployment has to supply a receipt key or the gateway refuses to
+          # start, so CI supplies a real one rather than the development
+          # escape hatch: this way the job exercises the configuration an
+          # operator is told to use.
+          key=$(node scripts/generate-receipt-key.mjs 2>/dev/null)
+          test -n "$key" || { echo "::error::no receipt key generated"; exit 1; }
+
           docker run -d --name gw -p 8787:8787 \
             -e OREOCHAIN_STORAGE=memory \
             -e OREOCHAIN_ALLOW_ANONYMOUS=true \
             -e OREOCHAIN_DB_PATH=/data/proofs.log \
+            -e OREOCHAIN_RECEIPT_KEY="$key" \
             oreochain-gateway:ci
 
           for i in $(seq 1 30); do
