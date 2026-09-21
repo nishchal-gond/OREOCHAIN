@@ -297,6 +297,37 @@ arrive rather than after buffering, strict CID validation before any upstream
 request, and a refusal to start when misconfigured rather than silently
 accepting anonymous uploads.
 
+### 2.10 Nothing the service sends becomes markup
+
+§2.8 treats a manifest as hostile. The same reasoning applies one layer up, to
+every string the pages display: a CID and a `kid` from the gateway, a
+transaction hash and an exporter's name from the chain, a refusal code out of
+a JSON body. Those are rendered next to icons and links, which makes writing
+them straight into `innerHTML` the natural thing to do — and that hands
+whoever chose the string the ability to write markup into the page.
+
+The content security policy the gateway serves (`script-src 'self' https:`,
+no `'unsafe-inline'`) stops injected markup from *running*: an `onerror=`
+attribute is inline script and the browser refuses it. It does not stop the
+markup from being there, and script is not what this particular page has to
+fear. The upload and retrieval pages hold a passphrase field, and a passphrase
+field drawn by the service is indistinguishable from the real one to the
+person typing in it.
+
+So `js/core/html.js` supplies a tagged template that escapes every
+interpolation, and `js/App.js` and `js/chunked-app.js` use it at every sink.
+The literal parts of a template are markup because a maintainer wrote them;
+the interpolations are escaped because someone else did. A fragment can only
+pass through unescaped by being built with the same tag, which is visible at
+the call site.
+
+Two tests hold the line. One scans the client for an assignment to `innerHTML`
+whose right-hand side is anything but a tagged template, a `toHtml()` call or
+a literal with nothing in it — so the next sink somebody writes fails the
+build rather than the review. The other is a browser test that puts an
+`<img id="pwned">` into a field the gateway is simply believed about, and
+asserts no such element exists in the document afterwards.
+
 ---
 
 ## 4. Threat model
@@ -318,6 +349,7 @@ accepting anonymous uploads.
 | Pinning credential theft from the page | Credential lives in the gateway, never the browser |
 | One client exhausting the pinning quota | Per-key rate limiting |
 | API key recovery by timing | Constant-time comparison over hashed values |
+| Gateway or chain data injected as markup into the page | Escaped at every sink; enforced by a source scan |
 
 ### Not defended
 
