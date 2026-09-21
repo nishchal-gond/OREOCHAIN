@@ -62,7 +62,13 @@ startup when no anchoring key is configured.
 | `HOST` | `127.0.0.1` | Listen address. Keep it loopback behind a reverse proxy. |
 | `OREOCHAIN_API_KEYS` | — | Comma-separated client keys, each ≥32 characters |
 | `OREOCHAIN_ANCHOR_API_KEYS` | — | The subset of the above allowed to drive anchoring. Unset means nothing may anchor. |
-| `OREOCHAIN_ALLOW_ANONYMOUS` | `false` | Disable auth entirely. Only for a genuinely public gateway. |
+| `OREOCHAIN_ALLOW_ANONYMOUS` | `false` | Serve anyone, with no key. Supported in production — see below. |
+| `OREOCHAIN_TRUSTED_PROXY_HOPS` | `0` | Proxies of your own in front of this process. Required behind one. |
+| `OREOCHAIN_CLIENT_BYTES_PER_WINDOW` | — | Bytes one client may pin per window |
+| `OREOCHAIN_CLIENT_OBJECTS_PER_WINDOW` | — | Objects one client may pin per window |
+| `OREOCHAIN_QUOTA_WINDOW_MS` | `3600000` | The window those two are measured over |
+| `OREOCHAIN_DAILY_BYTES` | — | Bytes the whole service may pin per day |
+| `OREOCHAIN_DAILY_OBJECTS` | — | Objects the whole service may pin per day |
 | `PINATA_JWT` | — | Pinning credential. Never leaves this process. |
 | `OREOCHAIN_STORAGE` | `pinata` | `memory` for local testing |
 | `OREOCHAIN_MAX_CHUNK_BYTES` | `1048576` | Hard cap per request body |
@@ -115,6 +121,24 @@ JWT or an `Authorization` header is truncated even under a field nobody thought
 to list. That is a backstop, not a licence.
 
 ## API
+
+Every refusal carries a `code`: one stable token from a closed set, so a
+client can decide what to do without matching on prose. It matters most where
+one status means two things — a `429` is "slow down" from the rate limiter and
+"not until your window rolls" from a byte cap, and a `503` is "try in a
+second" from load shedding and "not today" from the daily budget.
+
+| `code` | Typical status | What a client should do |
+|---|---|---|
+| `rate_limited` | 429 | Back off and retry; `Retry-After` says how long |
+| `client_quota` | 429 | Stop retrying until the window rolls over |
+| `busy` | 503 | Retry shortly; the gateway is at its concurrency ceiling |
+| `gateway_budget` | 503 | Stop for today; the service has spent its daily budget |
+| `unauthorized` | 401 | Fix the credential |
+| `forbidden` | 403 | The key is valid but not for this; see the message |
+| `bad_request` | 400 | Fix the request |
+
+The prose in `error` is for people and may change. The `code` will not.
 
 ### `GET /health`
 
@@ -557,6 +581,69 @@ Running two workers against one gateway is harmless but pointless: they race,
 the loser's transaction reverts with `AlreadyExists`, and gas is wasted. Run
 one.
 
+## Running it open to the public
+
+A visitor needs no account. That is the product, not a shortcut: someone
+sealing a document in their browser should not have to sign up first, and
+accounts would be the wrong shape for it. So `OREOCHAIN_ALLOW_ANONYMOUS=true`
+is a supported production configuration, and keyed mode is for private
+deployments.
+
+What makes it safe is not authentication. It is a ceiling on what it can cost.
+
+| Layer | Setting | What it stops |
+|---|---|---|
+| Per request | `OREOCHAIN_MAX_CHUNK_BYTES` | One body exhausting memory |
+| In flight | `OREOCHAIN_MAX_CONCURRENT_UPLOADS` | Many bodies at once doing the same |
+| Per client, per minute | `OREOCHAIN_RATE_LIMIT_*` | One visitor calling constantly |
+| Per client, per window | `OREOCHAIN_CLIENT_BYTES_PER_WINDOW`, `..._OBJECTS_...` | One visitor spending everyone's share |
+| Per day, service-wide | `OREOCHAIN_DAILY_BYTES`, `OREOCHAIN_DAILY_OBJECTS` | A thousand polite visitors adding up to a bill |
+
+The last two have no defaults, and with `OREOCHAIN_ALLOW_ANONYMOUS=true` and a
+pinning account the gateway **refuses to start** until all four are set,
+naming each one and suggesting a number. The right numbers depend on what your
+pinning plan costs; pick what you could afford to lose in a day.
+
+A client that hits its own ceiling gets `429` with `Retry-After` — its window
+will roll over. A request refused by the daily budget gets `503`, because
+nothing the caller does will help until the day turns. The daily counter
+resets at 00:00 UTC, and it lives in memory: **a restart starts the day's
+budget again.** That is deliberate — persisting it means another durable
+store, and this is a guard rail on a bill rather than a ledger — but it means
+a crash-looping gateway is not protected by it.
+
+Everything is in `/metrics`: `oreochain_daily_bytes_pinned` against
+`oreochain_daily_bytes_budget`, the same for objects,
+`oreochain_quota_clients`, and `oreochain_quota_rejections_total` by scope.
+Alert on the budget ones before they bite.
+
+### Behind a proxy, set `OREOCHAIN_TRUSTED_PROXY_HOPS`
+
+Every one of those per-client limits is keyed on the client's address, and
+behind a reverse proxy every request arrives from the proxy. Left at `0`, all
+your visitors share one rate limit and one byte budget, and the first heavy
+one shuts out the rest — on a gateway that looks perfectly healthy.
+
+Set it to the number of proxies of your own that a request passes through
+(usually `1`). The gateway then reads `X-Forwarded-For` counting that many
+entries from the right, which is the only part of it your own infrastructure
+wrote. It is `0` by default because trusting that header unconditionally is
+worse than ignoring it: anyone could then send one and mint a fresh budget per
+request.
+
+It applies to the public verification route as well. That one is
+unauthenticated, so the address is the only thing metering it: behind a proxy
+with hops at `0`, every verifier in the world shares one
+`OREOCHAIN_VERIFY_RATE_LIMIT_PER_MINUTE`, and one person checking a batch of
+certificates locks out everyone else.
+
+Two things make a missing setting visible rather than mysterious:
+`oreochain_trusted_proxy_hops` in `/metrics`, and
+`oreochain_forwarded_for_ignored_total`, which counts requests that arrived
+with the header while nothing was trusted. A non-zero count there with hops at
+`0` means there is a proxy in front of this gateway that the configuration
+does not know about.
+
 ## Deployment notes
 
 1. **Run a supported Node.** The code works on Node 18, but 18 is past
@@ -680,6 +767,10 @@ Honest list, so nobody assumes otherwise:
   with concurrent writers behind the same interface.
 - **No per-user quota or billing.** Rate limiting bounds the *rate*, not the
   total. A client within its rate limit can still pin indefinitely.
+- **The daily spend budget resets on restart.** It is a guard rail on a bill,
+  not a ledger; a crash-looping gateway is not protected by it. Persisting it
+  means a second durable store, which is a larger change than the protection
+  is worth today.
 - **Rate-limit buckets and the memory backend still reset on restart.** Neither
   matters: a bucket refills anyway, and the memory backend is for local
   development. Recorded documents and anchored batches *are* persisted — see

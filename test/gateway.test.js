@@ -220,12 +220,13 @@ test("API endpoints reject unauthenticated requests", async () => {
       const response = await fetch(`${gw.url}${path}`, init);
       assert.equal(response.status, 401, `${path} was not protected`);
       assert.match(response.headers.get("www-authenticate") || "", /Bearer/);
-      // The error must not hint at which part was wrong. The request id is
-      // the only other field, and it identifies the request rather than
-      // saying anything about the credential.
+      // The error must not hint at which part was wrong. The other fields say
+      // nothing about the credential: the request id identifies the request,
+      // and the code is the same refusal in a form a client can switch on.
       const body = await response.json();
       assert.equal(body.error, "unauthorized");
-      assert.deepEqual(Object.keys(body).sort(), ["error", "requestId"]);
+      assert.equal(body.code, "unauthorized");
+      assert.deepEqual(Object.keys(body).sort(), ["code", "error", "requestId"]);
     }
   } finally {
     await gw.stop();
