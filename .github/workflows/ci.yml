@@ -307,10 +307,40 @@ jobs:
           set -uo pipefail
           # stop_grace_period in the compose file has to be longer than the
           # shutdown delay, or the drain is killed halfway and the whole point
-          # of it is lost. A non-zero exit code here is what that looks like.
+          # of it is lost. A container killed at the end of its grace period
+          # exits 137 rather than 0, which is what that looks like from here.
+          #
+          # `--format json` rather than a Go template: template support in
+          # `compose ps` has moved between versions, and a --format the runner's
+          # compose does not understand would leave this step reporting nothing
+          # and passing. Not being able to read the exit code is a failure of
+          # this check, not a pass.
           docker compose stop
-          code=$(docker compose ps -a --format '{{.ExitCode}}' 2>/dev/null | head -1)
+          status=$(docker compose ps -a --format json 2>&1) || {
+            echo "::error::could not read container state after stopping"; echo "$status"; exit 1; }
           docker compose down -v
-          test "${code:-0}" = "0" \
-            || { echo "::error::the gateway did not exit cleanly under compose (exit $code)"; exit 1; }
-          echo "Stopped cleanly."
+
+          node -e '
+            const raw = process.argv[1].trim();
+            if (!raw) { console.error("compose reported no containers at all"); process.exit(1); }
+            // One JSON array in some versions, newline-delimited objects in
+            // others. Both are valid output; neither is optional to handle.
+            let rows;
+            try {
+              rows = raw.startsWith("[") ? JSON.parse(raw)
+                   : raw.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+            } catch (error) {
+              console.error("compose ps --format json was not JSON: " + error.message);
+              console.error(raw);
+              process.exit(1);
+            }
+            const gateway = rows.find((row) => (row.Service || row.service) === "gateway");
+            if (!gateway) { console.error("no gateway container in: " + raw); process.exit(1); }
+            const code = gateway.ExitCode ?? gateway.exitCode;
+            if (code === undefined) { console.error("no exit code in: " + raw); process.exit(1); }
+            if (code !== 0) {
+              console.error("::error::the gateway did not exit cleanly under compose (exit " + code + ")");
+              process.exit(1);
+            }
+            console.log("Stopped cleanly.");
+          ' "$status"
