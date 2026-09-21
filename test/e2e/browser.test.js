@@ -28,7 +28,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { loadPlaywright, openApp } from "./harness.mjs";
+import { anchorPending, loadPlaywright, openApp } from "./harness.mjs";
 import { loadToolchain } from "./chain.mjs";
 
 const missing = !loadPlaywright()
@@ -88,15 +88,22 @@ async function open(url, options = {}) {
   return { page, problems };
 }
 
-/** Upload a file through upload.html and return what the page reported. */
-async function upload({ page, file, passphrase = PASSPHRASE, suite }) {
+/**
+ * Upload a file through upload.html and return what the page reported.
+ *
+ * `mode` is the anchoring choice the page now offers. "wallet" is the explicit
+ * one — the user sends registerDocument() themselves — and "gateway" is what
+ * someone gets who touches nothing.
+ */
+async function upload({ page, file, passphrase = PASSPHRASE, suite, mode = "wallet" }) {
   await page.waitForFunction(() => typeof window.uploadChunked === "function", { timeout: 30_000 });
   await page.setInputFiles("#doc-file", file);
   if (passphrase !== null) await page.fill("#passphrase", passphrase);
   if (suite) await page.selectOption("#cipher-suite", suite);
+  if (mode === "wallet") await page.check("#anchor-wallet");
 
   await page.click("#chunked-upload-button");
-  const note = await waitForNote(page, /Registered on-chain/);
+  const note = await waitForNote(page, mode === "wallet" ? /Registered on-chain/ : /receipted/);
 
   return {
     note,
@@ -104,6 +111,11 @@ async function upload({ page, file, passphrase = PASSPHRASE, suite }) {
     summary: await page.locator("#chunk-summary").innerText(),
     fileHash: await page.locator("#file-hash").innerText(),
   };
+}
+
+/** The state the page is showing for this document's journey to the chain. */
+function anchorState(page) {
+  return page.locator("#anchor-state").getAttribute("data-state");
 }
 
 test("a real file survives the whole path: sealed, uploaded, anchored, restored", { skip: missing }, async () => {
@@ -307,14 +319,29 @@ test("a visitor with no wallet can retrieve and verify a document", { skip: miss
   assert.deepEqual(problems, []);
 });
 
-test("a page that signs asks for a wallet; a page that reads does not", { skip: missing }, async () => {
-  const wallets = await open("/upload.html", { wallet: false });
+test("the wallet is asked for only by the choice that needs one", { skip: missing }, async () => {
+  const { page } = await open("/upload.html", { wallet: false });
+
+  // The default path signs nothing, so a visitor with no wallet is not told
+  // to go and install one before they can do anything. That demand, shown
+  // unconditionally, is the thing this whole path exists to remove.
   assert.equal(
-    await wallets.page.locator(".alert").isVisible(),
-    true,
-    "upload.html signs a transaction, so it should say a wallet is needed"
+    await page.locator(".alert").isVisible(),
+    false,
+    "the default path needs no wallet, so upload.html should not demand one"
   );
-  assert.match(await wallets.page.locator(".alert").innerText(), /wallet/i);
+
+  await page.check("#anchor-wallet");
+  assert.equal(
+    await page.locator(".alert").isVisible(),
+    true,
+    "choosing to register from your own wallet should say a wallet is needed"
+  );
+  assert.match(await page.locator(".alert").innerText(), /wallet/i);
+
+  // And back again: the demand is a property of the choice, not a one-way door.
+  await page.check("#anchor-gateway");
+  assert.equal(await page.locator(".alert").isVisible(), false);
 
   const reader = await open("/retrieve.html", { wallet: false });
   assert.equal(
@@ -322,4 +349,111 @@ test("a page that signs asks for a wallet; a page that reads does not", { skip: 
     false,
     "retrieve.html only reads, so it should not"
   );
+});
+
+// ------------------------------------------------- the default anchoring path
+
+test("a visitor with no wallet uploads, is receipted, and is anchored", { skip: missing }, async () => {
+  const { file, bytes } = await sampleFile("gateway-anchored.pdf", 60_000);
+
+  // No wallet in this context at all. This is the path a user who has never
+  // heard of MetaMask walks, and until now it did not exist.
+  const uploader = await open("/upload.html", { wallet: false });
+  const result = await upload({ page: uploader.page, file, mode: "gateway" });
+
+  assert.match(result.note, /receipted/i);
+  assert.equal(await anchorState(uploader.page), "receipted");
+  assert.match(
+    await uploader.page.locator("#anchor-state").innerText(),
+    /not yet on the chain/i,
+    "a receipt that is not yet anchored has to say so rather than imply it is done"
+  );
+
+  // The receipt is the user's copy and has to survive the tab.
+  const receiptLink = uploader.page.locator("#receipt-download");
+  assert.ok(await receiptLink.isVisible(), "a receipted upload should offer the receipt");
+
+  const [download] = await Promise.all([
+    uploader.page.waitForEvent("download"),
+    receiptLink.click(),
+  ]);
+  const saved = path.join(workspace, "receipt.json");
+  await download.saveAs(saved);
+
+  const receipt = JSON.parse(fs.readFileSync(saved, "utf8"));
+  assert.equal(receipt.statement.version, "oreochain-receipt-v1");
+  assert.match(receipt.statement.fileHash, /^0x[0-9a-f]{64}$/);
+  assert.ok(receipt.signature.length > 0);
+  // The gateway checked the document against its manifest before signing.
+  assert.equal(receipt.statement.verified, true);
+
+  // Now the operator's side of the story, out of band, as the worker does it.
+  const anchored = await anchorPending(app.gateway, app.chain);
+  assert.ok(anchored, "there should have been a pending document to anchor");
+
+  // The page is still open and still watching.
+  await uploader.page.waitForFunction(
+    () => document.getElementById("anchor-state").dataset.state === "anchored",
+    undefined,
+    { timeout: 60_000 }
+  );
+  assert.match(
+    await uploader.page.locator("#anchor-state").innerText(),
+    /verified in this browser/i
+  );
+  assert.deepEqual(uploader.problems, []);
+
+  // And the document is still the document: retrieval is unchanged by how it
+  // reached the chain.
+  const share = new URL(result.shareUrl);
+  const reader = await open(share.pathname + share.search, { wallet: false });
+  await reader.page.fill("#retrieve-passphrase", PASSPHRASE);
+  await reader.page.click("#chunked-retrieve-button");
+  await waitForNote(reader.page, /Verified|match/);
+
+  assert.ok(fs.readFileSync(path.join(workspace, "receipt.json")).length > 0);
+  assert.ok(bytes.length > 0);
+});
+
+test("a stranger verifies a gateway-anchored document with no wallet", { skip: missing }, async () => {
+  const { file } = await sampleFile("sent-to-a-stranger.pdf", 40_000);
+
+  const uploader = await open("/upload.html", { wallet: false });
+  await upload({ page: uploader.page, file, mode: "gateway" });
+  await anchorPending(app.gateway, app.chain);
+
+  /*
+   * The whole proposition, from the other side. Someone who was sent this
+   * file, has no wallet, no receipt and no account, drops it on verify.html.
+   * There is no per-document record on-chain — the default path does not
+   * create one — so this only works if the page checks the inclusion proof
+   * against a batch root it read from the chain itself.
+   */
+  const { page, problems } = await open("/verify.html", { wallet: false });
+  await page.waitForFunction(() => typeof window.verifyRegistration === "function", {
+    timeout: 30_000,
+  });
+  await page.setInputFiles("#doc-file", file);
+  await page.click("#chunked-verify-button");
+
+  const note = await waitForNote(page, /Verified/);
+  assert.match(note, /anchored on-chain/i);
+  assert.match(await page.locator("#doc-status").innerText(), /Anchored on-chain/);
+  assert.deepEqual(problems, []);
+});
+
+test("a file that was never uploaded is still reported as unregistered", { skip: missing }, async () => {
+  // The batch fallback must not turn "no" into "maybe": a stranger checking a
+  // document that does not exist has to be told so plainly.
+  const { file } = await sampleFile("never-uploaded.pdf", 20_000);
+
+  const { page } = await open("/verify.html", { wallet: false });
+  await page.waitForFunction(() => typeof window.verifyRegistration === "function", {
+    timeout: 30_000,
+  });
+  await page.setInputFiles("#doc-file", file);
+  await page.click("#chunked-verify-button");
+
+  await waitForNote(page, /does not match/);
+  assert.match(await page.locator("#doc-status").innerText(), /Not registered/);
 });

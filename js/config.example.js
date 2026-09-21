@@ -26,6 +26,26 @@ window.OREOCHAIN_CONFIG = {
     rpcUrl: "https://polygon-rpc.com",
   },
 
+  anchoring: {
+    // How a document reaches the chain when the user does not choose
+    // otherwise on the upload page.
+    //
+    // "gateway"  the service receipts the document immediately and anchors a
+    //            batch containing it in one transaction it pays for. No
+    //            wallet is involved. This is what a visitor gets.
+    // "wallet"   the user sends registerDocument() themselves and pays the
+    //            gas. Still offered on the page either way; this setting only
+    //            decides which radio starts checked.
+    mode: "gateway",
+
+    // How long the upload page keeps watching for the anchor before telling
+    // the user it is still pending. Closing the tab costs nothing: the
+    // receipt already names the document and verify.html picks the story up
+    // at any point.
+    watchForMs: 600000,
+    pollIntervalMs: 5000,
+  },
+
   storage: {
     provider: "pinata",
 

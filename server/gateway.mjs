@@ -972,9 +972,15 @@ export function createHandler(config, backend, deps = {}) {
             const key = proofs.publicKeyFor(wanted);
             if (!key) {
               sendJson(res, 404, {
-                // Literal rather than the REFUSAL_CODES constant, which
-                // arrives on a sibling branch; the value is the same one.
-                code: "bad_request",
+                /*
+                 * bad_request, deliberately, on a 404. The closed set has no
+                 * not-found code, and adding one would change a contract the
+                 * browser client compares against — for a refusal whose cause
+                 * really is the request: a kid this gateway has never held is
+                 * a kid the caller should not have asked for. The status code
+                 * already says not-found; the code says whose fault it is.
+                 */
+                code: REFUSAL_CODES.BAD_REQUEST,
                 error: "this gateway has never signed with that key",
                 kid: wanted,
               });
