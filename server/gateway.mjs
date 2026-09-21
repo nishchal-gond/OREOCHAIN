@@ -959,11 +959,48 @@ export function createHandler(config, backend, deps = {}) {
       // Public proof endpoints, before the auth gate.
       if (proofs && req.method === "GET") {
         if (PUBLIC_API.has(url.pathname)) {
+          /*
+           * With a kid, the key that signed some particular receipt — which
+           * may be one this gateway has since rotated away from. A receipt is
+           * portable and long-lived, so someone can come back a year later
+           * with one, and serving only the current key would make every
+           * receipt issued before a rotation fail to verify, with the same
+           * answer a forgery gets.
+           */
+          const wanted = url.searchParams.get("kid");
+          if (wanted) {
+            const key = proofs.publicKeyFor(wanted);
+            if (!key) {
+              sendJson(res, 404, {
+                /*
+                 * bad_request, deliberately, on a 404. The closed set has no
+                 * not-found code, and adding one would change a contract the
+                 * browser client compares against — for a refusal whose cause
+                 * really is the request: a kid this gateway has never held is
+                 * a kid the caller should not have asked for. The status code
+                 * already says not-found; the code says whose fault it is.
+                 */
+                code: REFUSAL_CODES.BAD_REQUEST,
+                error: "this gateway has never signed with that key",
+                kid: wanted,
+              });
+              return;
+            }
+            sendJson(res, 200, {
+              kid: key.kid,
+              publicJwk: key.publicJwk,
+              algorithm: "ECDSA-P256-SHA256",
+              retiredAt: key.retiredAt,
+            });
+            return;
+          }
+
           sendJson(res, 200, {
             kid: proofs.kid,
             publicJwk: proofs.publicJwk,
             algorithm: "ECDSA-P256-SHA256",
             ephemeral: proofs.ephemeral,
+            keys: proofs.keys(),
           });
           return;
         }
