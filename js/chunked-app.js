@@ -1090,10 +1090,34 @@ async function verifyWithoutChain(client, fileHash) {
       ? `The service says it is anchored in the transaction above; this page did not confirm that.`
       : `The service does not claim it is anchored on-chain yet.`;
   say(
-    html`Checked here: the service signed for this exact file, and its inclusion proof is internally consistent. Not checked here: whether that batch is on the chain. ${anchored} ${hint}`,
+    html`Checked here: the service signed for this exact file, and its inclusion proof is internally consistent. Not checked here: whether that batch is on the chain. ${anchored}${retirementNote(
+      checked.receipt
+    )} ${hint}`,
     "warning"
   );
   return { registered: null, anchored: null, fileHash, checked };
+}
+
+/**
+ * A word about a receipt whose signing key the service has since replaced.
+ *
+ * Said because it checked out, not despite it. A receipt signed by a retired
+ * key is exactly as good as one signed by the current key — the service
+ * committed to the document at the time and the keyring still holds the key
+ * that proves it — but the phrase "retired key" is alarming enough that
+ * someone who learns it elsewhere, and not here, will reasonably wonder what
+ * they were not told. Saying it plainly, next to the verdict, is what makes
+ * the verdict believable.
+ *
+ * Nothing is said when the key is still current, which is the ordinary case
+ * and needs no sentence.
+ */
+function retirementNote(receipt) {
+  if (!receipt || !receipt.valid || !receipt.retiredAt) return "";
+  return (
+    ` The key that signed it has since been retired by the service, which does not weaken it: ` +
+    `the receipt was issued while that key was in use, and the service still publishes it.`
+  );
 }
 
 /** Hash the selected file locally so the user can look up their own document. */

@@ -578,3 +578,54 @@ test(
     assert.deepEqual(problems, []);
   }
 );
+
+test(
+  "a receipt still verifies after the service rotates its signing key",
+  { skip: missing },
+  async () => {
+    const { file } = await sampleFile("outlives-a-rotation.pdf", 30_000);
+
+    const uploader = await open("/upload.html", { wallet: false });
+    await upload({ page: uploader.page, file, mode: "gateway" });
+    await anchorPending(app.gateway, app.chain);
+
+    /*
+     * What an operator does: generate a new key, set OREOCHAIN_RECEIPT_KEY,
+     * restart. The receipt in the user's hands was signed by the old one and
+     * nobody is going to reissue it.
+     *
+     * This is the case a single-key gateway cannot produce, which is why it
+     * waited for the keyring to land. Before the keyring, the honest answer
+     * a client could give here was "this service cannot produce the key this
+     * receipt names" — and the tempting wrong one was "forged".
+     */
+    const { before, after } = await app.gateway.rotateReceiptKey();
+    assert.notEqual(before, after, "the rotation should actually change the key");
+
+    const { page, problems } = await open("/verify.html", { wallet: false, rpcUrl: false });
+    await page.waitForFunction(() => typeof window.verifyRegistration === "function", {
+      timeout: 30_000,
+    });
+    await page.setInputFiles("#doc-file", file);
+    await page.click("#chunked-verify-button");
+
+    const note = await waitForNote(page, /Checked here/);
+
+    // The signature check passed against a key that is no longer the one
+    // signing. That is the whole feature.
+    assert.match(note, /the service signed for this exact file/);
+    assert.match(note, /since been retired/, "a retired key should be named, not glossed over");
+    assert.match(note, /does not weaken it/);
+
+    // And the failure this guards against: a good receipt reported as one the
+    // service never issued.
+    assert.doesNotMatch(note, /not issued by it/i);
+    assert.doesNotMatch(note, /cannot produce the key/i);
+    assert.doesNotMatch(
+      await page.locator("#doc-status").innerText(),
+      /Not from this service|Not registered/
+    );
+
+    assert.deepEqual(problems, []);
+  }
+);
