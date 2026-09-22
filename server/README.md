@@ -417,6 +417,7 @@ endpoint only as a chain read it cannot perform itself.
 |---|---|---|
 | `verified` | anchored, by whichever paths `anchoredBy` names | 200 |
 | `not-anchored` | recorded here, proof valid, not yet on-chain by either path | 200 |
+| `receipted` | recorded and receipted here, not yet in a batch, so no proof yet | 200 |
 | `disputed` | the chain disagrees with this gateway; see `warnings` | 200 |
 | `unchecked` | this gateway is not configured to read the chain | 200 |
 | `unavailable` | the chain could not be reached — **not** a negative | 503 + `Retry-After` |
@@ -426,6 +427,16 @@ endpoint only as a chain read it cannot perform itself.
 `unavailable` exists because a regulator acting on a false "this document is
 not anchored" is the worst thing this endpoint can produce. An RPC that is
 down says so; it never becomes a "no".
+
+`receipted` exists for the same reason. It is the first
+`OREOCHAIN_BATCH_MAX_AGE_MS` of every upload — an hour by default — and it used
+to answer `unknown`, which is the answer a document nobody has ever heard of
+gets, while the signed receipt for it sat in this gateway's own store. It is
+kept distinct from `not-anchored`, the state directly after it, because the
+difference is whether a verifier has anything to do: `not-anchored` carries a
+batch and a valid inclusion proof and waits only on the chain, while
+`receipted` carries a receipt and nothing else. Check the signature and ask
+again.
 
 **Cost control.** This is the only public route that does outside work per
 call, so: a confirmed anchor is cached for `OREOCHAIN_CHAIN_CACHE_MS` (an

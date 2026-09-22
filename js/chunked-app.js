@@ -1200,8 +1200,23 @@ async function verifyWithoutChain(client, fileHash) {
     checked.anchor !== null
       ? `The service says it is anchored in the transaction above; this page did not confirm that.`
       : `The service does not claim it is anchored on-chain yet.`;
+
+  /*
+   * A document that is receipted but not yet batched has no inclusion proof at
+   * all, so claiming one "is internally consistent" would be describing a check
+   * that never ran. What was actually checked here is the signature, and saying
+   * only that is the whole difference between the two states.
+   */
+  const checkedHere = body.batch
+    ? "the service signed for this exact file, and its inclusion proof is internally consistent"
+    : "the service signed for this exact file";
+  const notCheckedHere = body.batch
+    ? "whether that batch is on the chain"
+    : "anything on the chain — this document is not in a batch yet, so there is no inclusion " +
+      "proof to check and nothing on-chain to find";
+
   say(
-    html`Checked here: the service signed for this exact file, and its inclusion proof is internally consistent. Not checked here: whether that batch is on the chain. ${anchored}${retirementNote(
+    html`Checked here: ${checkedHere}. Not checked here: ${notCheckedHere}. ${anchored}${retirementNote(
       checked.receipt
     )} ${hint}`,
     "warning"

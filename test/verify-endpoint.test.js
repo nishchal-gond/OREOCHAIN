@@ -289,6 +289,87 @@ test("a registration naming a different Merkle root is disputed, not verified", 
   }
 });
 
+test("a document recorded but not yet batched is not 'never seen'", async () => {
+  /*
+   * The window this covers is every upload's first OREOCHAIN_BATCH_MAX_AGE_MS,
+   * an hour by default. Through all of it the gateway answered 404 and "no
+   * record of that document" — the same answer a document nobody has ever
+   * heard of gets — while the signed receipt for it sat in this gateway's own
+   * store.
+   *
+   * It is the one output this endpoint's design says must never be produced
+   * carelessly: a verifier who acts on "no record" does something
+   * irreversible, and here they would be acting on a document accepted
+   * minutes earlier. The route is careful about "could not check" for exactly
+   * that reason; it was not careful about this.
+   */
+  const gw = await startGateway({ reader: null });
+  try {
+    const { document } = await recorded(gw, { build: false });
+    assert.equal(gw.proofs.status().pending, 1, "the document is recorded and unbatched");
+
+    const response = await verify(gw, document.fileHash);
+    assert.equal(response.status, 200, "a document this gateway receipted is not a 404");
+
+    const body = await response.json();
+    assert.equal(body.gatewayClaim.status, "receipted");
+    assert.equal(body.gatewayClaim.verified, false);
+    assert.deepEqual(body.gatewayClaim.anchoredBy, []);
+
+    // The receipt is the whole point: it exists, so it is handed over.
+    assert.ok(body.receipt, "the gateway signed for this document and must hand it over");
+    assert.equal(body.receipt.statement.fileHash, document.fileHash);
+
+    // A null batch is what tells this apart from a batched document that is
+    // merely not anchored yet.
+    assert.equal(body.batch, null);
+    assert.match(body.gatewayClaim.explain, /not in a batch yet/);
+    assert.match(body.gatewayClaim.explain, /not a statement that the document is unregistered/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("the same holds with chain access, where the contract has not heard of it either", async () => {
+  // The production configuration: a reader is present, the chain answers
+  // honestly that it holds nothing, and the gateway still holds a receipt.
+  const gw = await startGateway({ reader: stubChain() });
+  try {
+    const { document } = await recorded(gw, { build: false });
+
+    const response = await verify(gw, document.fileHash);
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+    assert.equal(body.gatewayClaim.status, "receipted");
+    assert.ok(body.receipt);
+    assert.equal(body.batch, null);
+    assert.match(body.gatewayClaim.explain, /not in a batch yet/);
+  } finally {
+    await gw.stop();
+  }
+});
+
+test("a batched document is not-anchored, where an unbatched one is receipted", async () => {
+  // Two consecutive states, and the difference is whether a verifier has
+  // anything to check. Collapsing them into one status would hide that.
+  const gw = await startGateway({ reader: stubChain() });
+  try {
+    const { document } = await recorded(gw); // built this time
+    const body = await (await verify(gw, document.fileHash)).json();
+
+    assert.equal(
+      body.gatewayClaim.status,
+      "not-anchored",
+      "the next state along, not the same one"
+    );
+    assert.ok(body.batch, "a built batch is served with its inclusion proof");
+    assert.match(body.gatewayClaim.explain, /inclusion proof is valid/);
+  } finally {
+    await gw.stop();
+  }
+});
+
 test("a document nobody has heard of is a 404, from either source", async () => {
   const chain = stubChain();
   const gw = await startGateway({ reader: chain });

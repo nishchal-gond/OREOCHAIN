@@ -591,6 +591,41 @@ export function createHandler(config, backend, deps = {}) {
       },
     });
 
+    /**
+     * Recorded, receipted, and not yet in a batch.
+     *
+     * This window is every upload's first OREOCHAIN_BATCH_MAX_AGE_MS — an hour
+     * by default — and it used to answer 404 "unknown": the same answer a
+     * document nobody has ever heard of gets, while the signed receipt for it
+     * sat in this gateway's own store.
+     *
+     * That is the one output this endpoint's design says must never be
+     * produced carelessly. The route is scrupulous about "could not check" for
+     * exactly that reason — a verifier who acts on "no record" does something
+     * irreversible — and here they would have been acting on a document this
+     * gateway accepted minutes earlier.
+     *
+     * `receipted` rather than reusing `not-anchored`, which is the next state
+     * along: that one has a batch and a valid inclusion proof and waits only on
+     * the chain, so a verifier can do real work with it. This one has neither
+     * yet. Collapsing the two would hide the difference that actually matters —
+     * whether there is anything to check — behind a `batch: null` a client
+     * would have to know to look at. The word is the one the browser already
+     * uses for this state, and verifyWithoutChain's only special case is
+     * `status === "unknown"`, so an existing client renders it rather than
+     * discarding it.
+     */
+    const receiptedClaim = () => ({
+      verified: false,
+      status: "receipted",
+      anchoredBy: [],
+      explain:
+        "this gateway accepted this document and signed a receipt for it, and the anchor is " +
+        "still owed: it is not in a batch yet, so there is no inclusion proof to check and " +
+        "nothing on-chain to find. Check the receipt's signature against the key at " +
+        "GET /api/proofs/key. This is not a statement that the document is unregistered.",
+    });
+
     const proof = await proofs.proofFor(fileHash);
     const receipt = proofs.receiptFor(fileHash);
 
@@ -630,6 +665,14 @@ export function createHandler(config, backend, deps = {}) {
 
     if (!confirmer) {
       if (!proof) {
+        if (receipt) {
+          return answer(200, receiptedClaim(), {
+            receipt,
+            batch: null,
+            registration: null,
+            chainRead: null,
+          });
+        }
         return answer(404, {
           verified: false,
           status: "unknown",
@@ -801,6 +844,13 @@ export function createHandler(config, backend, deps = {}) {
     }
 
     if (!proof) {
+      // The chain has been read by this point and holds no registration
+      // either, so a receipt in the store is the whole of what is known about
+      // this document — which is a great deal more than "unknown".
+      if (receipt) {
+        Object.assign(claim, receiptedClaim());
+        return answer(200, claim, materials);
+      }
       claim.status = "unknown";
       claim.explain = "neither this gateway nor the contract has any record of that document";
       return answer(404, claim, materials);
