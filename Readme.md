@@ -355,7 +355,7 @@ server/storage.mjs                 server-side pinning; holds the credential
 server/auth.mjs                    constant-time API key checks
 server/ratelimit.mjs               per-key token bucket
 
-test/                              596 tests, including EVM cross-checks
+test/                              597 tests, including EVM cross-checks
 docs/SECURITY.md                   design rationale and threat model
 docs/SEALING.md                    chunking, sealing and key-derivation settings
 ```
@@ -400,7 +400,7 @@ every field in one before a single cryptographic check runs:
 ## Tests
 
 ```bash
-npm test           # 596 tests
+npm test           # 597 tests
 npm run test:e2e   # the pages driven in a real browser (needs Playwright)
 npm run abi        # regenerate js/contract-abi.js after changing the contract
 npm run vendor     # regenerate js/vendor/noble after changing a @noble version
